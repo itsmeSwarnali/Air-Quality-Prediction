@@ -1,0 +1,772 @@
+---
+title: "Visualization"
+output:
+  html_document: 
+    toc: true
+    toc_float: true
+    toc_depth: 2
+    number_sections: true
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+source("00_set_up.R")
+summary(data)
+```
+
+
+# Loads & Install Packages
+```{r }
+# installation of packages in case the user has not installed yet
+
+requirements <- c("nnet", "MASS", "e1071", "class", "leaps", "glmnet", "car", "caTools", "pROC", "summarytools", "dplyr", "ggplot2", "tidyverse", "lubridate",
+              "mapview", "sf", "geojsonio", "leaflet", "broom", "gridExtra", "leafpop")
+
+
+for (req in requirements){
+  if (!require(req, character.only = TRUE)){
+      install.packages(req)
+  }
+}
+
+
+library(dplyr)
+library(ggplot2)
+library(summarytools)
+library(car)
+
+```
+# Data Exploration
+```{r }
+#data <- read.csv("/data/NY_BEMQ_pollution_weather_2020_2024_annotated_merged.csv")
+
+head(data)
+```
+# Dataset Description
+
+The NY_BEMQ_pollution_weather_2020_2024_annotated_merged dataset is a daily table at the city level that includes meteorological conditions, pollutant-specific AQI sub-indices, and air pollution readings.We can
+
+  - model/predict daily AQI using weather + pollutants and
+  - compare patterns between 2020 (COVID period) and 2024 (more normal period) because each row represents a single city on a single calendar day.
+  
+  Two complete leap years (2020 and 2024) and four cities in New York State - Bronx, Erie, Monroe, and Queens are included in the dataset.
+  
+  - 4 cities × 366 days (2020) = 1464
+  - 4 cities × 366 days (2024) = 1464
+  - Total = 2928 rows
+  
+The dataset is formed by the following columns:
+
+1 **Date and Location**:
+
+  - **date**: Calendar date of the observation
+  - **city**: City label (Bronx, Erie, Monroe, Queens)
+  - **year**: Year extracted from the date (2020 or 2024).
+  
+2 **Pollutant concentrations (daily mean values)**:
+
+  - **co_mean**: Daily mean co level
+  - **no2_mean**: Daily mean no2 level
+  - **so2_mean**: Daily mean so2 level
+  - **pm2_5_mean**: Daily mean pm2_5_mean level
+  - **o3_mean**: Daily mean o3 level
+  
+3 **Pollutant-specific AQI sub-indices**:
+
+  - **co_aqi**: AQI sub-index computed from **co_mean** for that day/city.
+  - **no2_aqi**: AQI sub-index computed from **no2_mean**.
+  - **so2_aqi**: AQI sub-index computed from **so2_mean**.
+  - **pm2_5_aqi**: AQI sub-index computed from **pm2_5_mean**
+  - **o3_aqi**: AQI sub-index computed from **o3_mean**.
+  
+4 **Meteorological predictors (daily values)**:
+
+  - **temp**: Daily temperature value.
+  - **humidity**: Daily humidity value.
+  - **windspeed**: Daily wind speed value
+
+5 **Derived target and labels**:
+
+  - **max_aqi**: The daily AQI outcome used as regression target. It is the maximum of the available                     pollutant AQI sub-indices for that row/day (i.e., the “worst” pollutant drives the day’s AQI).
+  - **Main_Pollutant**: The pollutant that achieves max_aqi on that day (the “winner pollutant”).
+  - **aqi_level**: A categorical label derived from max_aqi:
+  
+    - **healthy** if max_aqi ≤ 50
+    - **unhealthy** if max_aqi ≥ 51
+    
+  - **aqi_level_bin**: Numeric encoding of aqi_level (0 = healthy, 1 = unhealthy).
+  
+**Missing values (important for modeling)**:
+A small amount of missingness exists only in some pollutant columns (weather + max_aqi are complete). In this file the missing counts are:
+
+  - **co_mean / co_aqi**: 10 missing (≈ 0.3%)
+  - **no2_mean / no2_aqi**: 86 missing (≈ 2.9%)
+  - **so2_mean / so2_aqi**: 30 missing (≈ 1.0%)
+  - **o3_mean / o3_aqi**: 115 missing (≈ 3.9%)
+  
+  
+# Objective
+
+The project has two different goals:
+
+1. First, to model and predict the air quality by using meteorological predictors (temperature, humidity, wind speed) and five key pollutants (CO, NO₂, SO₂, PM₂.₅, O₃) and see how the variations of these predictors can change the air quality as good, moderate and unhealthy and which pollutant dominates the quality of the year.
+
+2. Second, to compare the air quality pattern between 2020 and 2024 in the same cities. Since 2020 corresponds to the COVID period with less mobility and emissions and 2024 is a more “normal” year, the analysis will quantify how the frequency and severity of bad-air days, as well as the main responsible pollutant, change between these two periods.
+
+
+```{r }
+dim(data)
+```
+
+
+```{r }
+na_counts <- colSums(is.na(data))
+na_counts <- na_counts[na_counts > 0]
+
+for (nm in names(na_counts)) {
+  cat(nm, ":", na_counts[nm], "\n")
+}
+```
+
+
+```{r }
+
+print(dfSummary(data, 
+                plain.ascii  = FALSE, 
+                style        = "multiline", 
+                headings     = FALSE,
+                graph.magnif = 0.8, 
+                valid.col    = FALSE),
+                method = 'render')
+```
+
+
+# Data Visualization
+```{r}
+names(data)
+```
+# Load Datasets
+
+These are the imputed trainset and testset. To study  the imputation, please visit the "ImputedMissing.Rmd" in the same repository.
+```{r}
+
+train_full<- readRDS("train_all_2020_impute.rds")
+test_full  <- readRDS("test_all_2024_impute.rds")
+```
+
+
+
+```{r}
+na_counts <- colSums(is.na(train_full))
+na_counts <- na_counts[na_counts > 0]
+
+for (nm in names(na_counts)) {
+  cat(nm, ":", na_counts[nm], "\n")
+}
+
+```
+
+As I will only use the mean values of the pollutants, I imputed only the mean concentrations of the pollutants not aqi  of them. Therefore, there are still missing values on the aqi columns.
+
+```{r}
+na_counts <- colSums(is.na(test_full))
+na_counts <- na_counts[na_counts > 0]
+
+for (nm in names(na_counts)) {
+  cat(nm, ":", na_counts[nm], "\n")
+}
+
+```
+
+
+I divide the data visualisation in the following subsections:
+  1. AQI Based on cities and AQI Level (2020 vs 2024)
+  2. Different Pollutants on cities and AQI Level (2020 vs 2024)
+  3. Monthly Mean max_aqi 2020 and 2024
+  4. Per city healthy and unhealthy days
+  5. Healthy vs Unhealthy Days 2020 vs 2024
+  6. Main_Pollutant counts: 2020 vs 2024
+  
+## AQI Based on Cities and AQI Level (2020)
+```{r }
+
+train_full$Year <- "2020"
+test_full$Year  <- "2024"
+
+plot_df <- rbind(
+  train_full[, c("city","aqi_level","pm2_5_mean","Year", "max_aqi", "no2_mean", "so2_mean", "co_mean", "o3_mean")],
+  test_full[,  c("city","aqi_level","pm2_5_mean","Year", "max_aqi", "no2_mean", "so2_mean", "co_mean", "o3_mean")]
+)
+
+plot_df$Year <- factor(plot_df$Year, levels = c("2020","2024"))
+```
+
+
+```{r }
+# 2020
+
+ggplot(train_full,
+       aes(x = city, y = max_aqi, color = aqi_level)) +
+  geom_boxplot() +
+  labs(title = "City - Max AQI - Aqi Level 2020",
+       x = "City", y = "Max AQI", color = "Aqi Level")
+```
+
+
+
+## AQI by City and AQI Level (2020 vs 2024)
+```{r}
+
+ggplot(plot_df, aes(x = city, y = max_aqi, fill = aqi_level)) +
+  geom_boxplot(outlier.alpha = 0.6) +
+  facet_wrap(~ Year, nrow = 1) +
+  labs(
+    title = "AQI by City and AQI Level (2020 vs 2024)",
+    x = "City", y = "max_aqi", fill = "AQI level"
+  ) +
+  theme_bw()
+```
+This figure shows max_aqi by city (Bronx, Erie, Monroe, Queens) split into healthy vs unhealthy for 2020 vs 2024. In both years, the two categories are clearly separated: healthy days cluster about ~35-40 and unhealthy days are higher at ~55-65. From 2020 to 2024, all cities have extremely similar healthy proportions indicating that baseline circumstances have not changed significantly. 
+
+The key difference is that the unhealthy group is significantly larger and/or more variable in 2024, particularly in the Bronx and Queens. Across cities, Queens has the greatest adverse effects and a broader distribution, whereas Monroe has the lowest and most stable. Rare dramatic spikes (about 150-160) appear in both years, showing that severe pollution outbreaks continue to occur occasionally. 
+
+```{r}
+
+
+```
+
+## Different Pollutants on Cities and AQI Level (2020 vs 2024)
+```{r }
+
+ggplot(plot_df, aes(x = city, y = pm2_5_mean, fill = aqi_level)) +
+  geom_boxplot(outlier.alpha = 0.6) +
+  facet_wrap(~ Year, nrow = 1) +
+  labs(
+    title = "PM2.5_mean by City and AQI Level (2020 vs 2024)",
+    x = "City", y = "PM2.5_mean", fill = "AQI level"
+  ) +
+  theme_bw()
+```
+
+This graph compares PM2.5_mean by city (Bronx, Erie, Monroe, Queens) between 2020 and 2024, separating healthy and unhealthy areas. In both years, PM2.5 significantly differentiates the classes: healthy medians are about 4-6, whereas unhealthy medians are around 9-12. From 2020 to 2024, the central values (medians) appear to be essentially similar, with Queens somewhat higher in the unhealthy category in 2024 than in 2020. The most significant year difference is in the extremes: 2020 has more severe spikes (particularly Erie reaching about 40 and numerous points above 20), but 2024 has fewer/lower extreme cases (usually up to around 25-27). Across cities, Monroe regularly ranks lowest/tightest, whereas Queens (and sometimes the Bronx) has a wider spread in the harmful range. Overall, PM2.5 remains a robust predictor of unhealthy days in both periods, with 2020 showing more intense occurrences than 2024.
+```{r }
+
+ggplot(plot_df, aes(x = city, y = no2_mean, fill = aqi_level)) +
+  geom_boxplot(outlier.alpha = 0.6) +
+  facet_wrap(~ Year, nrow = 1) +
+  labs(
+    title = "NO2_Mean by City and AQI Level (2020 vs 2024)",
+    x = "City", y = "no2_mean", fill = "AQI level"
+  ) +
+  theme_bw()
+```
+This graph compares NO2_mean by city and AQI class for 2020 and 2024. In both years, unhealthy days experienced greater NO₂ than healthy days, with the biggest divergence in the Bronx and Queens (unhealthy medians around ~30-40 vs healthy nearly 18-25), while Monroe remains the lowest (medians near 10-15). From 2020 to 2024, the central levels remain consistent, while the Bronx has a somewhat wider/higher harmful range in 2024 (highest values reaching 60+). Queens and Bronx continue to have the highest NO₂ levels, while Monroe has the lowest. In all periods, NO₂ levels are closely associated with being unhealthy.
+
+```{r }
+ggplot(plot_df, aes(x = city, y = so2_mean, fill = aqi_level)) +
+  geom_boxplot(outlier.alpha = 0.6) +
+  facet_wrap(~ Year, nrow = 1) +
+  labs(
+    title = "SO2_mean by City and AQI Level (2020 vs 2024)",
+    x = "City", y = "so2_mean", fill = "AQI level"
+  ) +
+  theme_bw()
+```
+
+The SO2_mean by city and AQI class for 2020 and 2024 are compared in this image. SO₂ divides the classes much less than PM2.5/NO₂ because SO₂ levels are generally low in both years (most medians around 0.2–1.2), with just a slight upward shift for the unhealthy group. The biggest year difference is in extremes: 2024 has fewer/lower outliers (mainly below 5–8), while 2020 has many more high outliers, particularly Erie with spikes up to 15–16 (and Queens also exhibiting many elevated spots). Due to episodic surges, Queens and Erie have the biggest spread among cities, whereas Monroe continues to be the lowest and tightest in both years. In general, 2024's usual SO₂ levels are comparable to 2020's, but there are fewer high SO₂ incidents.
+```{r }
+ggplot(plot_df, aes(x = city, y = o3_mean, fill = aqi_level)) +
+  geom_boxplot(outlier.alpha = 0.6) +
+  facet_wrap(~ Year, nrow = 1) +
+  labs(
+    title = "O3_mean by City and AQI Level (2020 vs 2024)",
+    x = "City", y = "o3_mean", fill = "AQI level"
+  ) +
+  theme_bw()
+```
+**o3_mean** by city and AQI class for 2020 and 2024 are compared in this figure. In contrast to **pm2.5/no2**, ozone exhibits less class separation: unhealthy medians are only marginally higher and primarily differ by having a significantly wider variance (frequently reaching nearly 0.06–0.08), while healthy medians are reasonably steady around nearly 0.03–0.04. The general trend from 2020 to 2024 is quite similar, with Monroe continuing to be relatively tighter and Bronx, Erie, and Queens continuously displaying the most variability in the unhealthy category. The persistence of the higher tails (high-ozone values) in both years indicates that ozone-related elevated episodes occur in both eras, but they mainly manifest as greater variability/extremes rather than a significant change in usual (median) levels. 
+```{r }
+ggplot(plot_df, aes(x = city, y = co_mean, fill = aqi_level)) +
+  geom_boxplot(outlier.alpha = 0.6) +
+  facet_wrap(~ Year, nrow = 1) +
+  labs(
+    title = "CO_mean by City and AQI Level (2020 vs 2024)",
+    x = "City", y = "co_mean", fill = "AQI level"
+  ) +
+  theme_bw()
+```
+This graph contrasts CO_mean by city and AQI class between 2020 and 2024. Unhealthy days have significantly greater CO than healthy days in both years (healthy medians are about ~0.20–0.30 vs. unhealthy ~0.30–0.50), with Bronx and Queens showing the most obvious rise. The medians from 2020 to 2024 are generally comparable, while Queens continues to be among the highest in both years, and the Bronx exhibits a little broader and higher unhealthy distribution in 2024. Both periods have extreme CO events, but 2020 has the biggest rises (Queens reaching about ~1.6–1.7), while 2024 outliers are present but often lower. In general, CO is correlated with unhealthy days in all cities, with the primary year difference appearing in the higher tail rather than in average levels.
+
+## Meterological Predictors on cities and AQI Level 2020 vs 2024
+
+
+```{r}
+
+plot_df <- rbind(
+  train_full[, c("city", "aqi_level", "temp","humidity","windspeed","Year", "max_aqi")],
+  test_full[,c("city","aqi_level","temp","humidity","windspeed","Year", "max_aqi")]
+)
+
+
+ggplot(plot_df, aes(x = city, y = windspeed, fill = aqi_level)) +
+  geom_boxplot(outlier.alpha = 0.6) +
+  facet_wrap(~ Year, nrow = 1) +
+  labs(
+    title = "Windspeed by City and AQI Level (2020 vs 2024)",
+    x = "City", y = "windspeed", fill = "AQI level"
+  ) +
+  theme_bw()
+```
+
+This graph shows windspeed by city and AQI class in 2020 against 2024. In both years and cities, unhealthy days likely to occur at lower wind speeds than healthy days (healthy medians around 14-18 vs unhealthy around 10-15), indicating poorer dispersion in calmer conditions. The trend between 2020 and 2024 is quite similar overall, with just minor changes in medians, but Erie and Queens have slightly wider spreads in 2024. Queens has greater average winds but still exhibits lower winds on unhealthy days, while Monroe constantly has the lowest wind speeds for both classifications. Lower wind speed is linked to hazardous AQI in both 2020 and 2024, however high-wind outliers (30–40+) are uncommon and do not alter the general signal.
+```{r}
+
+
+ggplot(plot_df, aes(x = city, y = temp, fill = aqi_level)) +
+  geom_boxplot(outlier.alpha = 0.6) +
+  facet_wrap(~ Year, nrow = 1) +
+  labs(
+    title = "Temp by City and AQI Level (2020 vs 2024)",
+    x = "City", y = "temp", fill = "AQI level"
+  ) +
+  theme_bw()
+```
+
+This graph compares the 2020 and 2024 temperatures by city and AQI class. Unhealthy days typically occur at higher temperatures than healthy days in both years (unhealthy medians typically 60–75 vs. healthy range 45–65), suggesting that poorer AQI is more prevalent in warmer weather. The difference between 2020 and 2024 is small, but in 2024, central temperatures for both classes are marginally higher in a number of places, most notably the Bronx and Monroe, with Monroe continuously being the warmest. Monroe/Queens sit higher and have wider warm ranges, while Erie has the lowest temps and the largest cold tail among all cities. Overall, in both 2020 and 2024, there is a continuous correlation between temperature and AQI class: warmer days are linked to bad air.
+```{r}
+
+ggplot(plot_df, aes(x = city, y = humidity, fill = aqi_level)) +
+  geom_boxplot(outlier.alpha = 0.6) +
+  facet_wrap(~ Year, nrow = 1) +
+  labs(
+    title = "Humidity by City and AQI Level (2020 vs 2024)",
+    x = "City", y = "humidity", fill = "AQI level"
+  ) +
+  theme_bw()
+```
+The humidity by city and AQI class for 2020 and 2024 is compared in this figure. Humidity is a weak to moderate identifier in both years; unhealthy days frequently have slightly higher humidity than good days, but the boxes overlap significantly. The Bronx exhibits a little decline in healthy humidity (lower median) between 2020 and 2024, whereas Erie and Monroe maintain consistently high medians (mid-60s to mid-70s) for both classes. Queens has lower medians and a wider spread than Monroe/Erie, but Monroe has higher unhealthy medians in both years and is the most humid overall. Compared to the more obvious pollutant-based separations, humidity patterns are often quite constant throughout time, with only slight variations.
+
+## Monthly Mean max_aqi 2020 vs 2024
+```{r }
+
+train_full$month_num <- as.integer(format(train_full$date, "%m"))
+
+# Monthly mean max_aqi per city
+m <- aggregate(max_aqi ~ year + month_num + city, data = train_full, mean, na.rm = TRUE)
+
+
+
+
+
+######## 2020 #########
+
+yr <- 2020
+d <- subset(m, year == yr)
+
+cities <- sort(unique(d$city))
+cols <- 1:length(cities)
+
+plot(NA, xlim = c(1, 12), ylim = range(d$max_aqi, na.rm = TRUE),
+     xlab = "Month", ylab = "Mean max_aqi",
+     main = paste("Monthly Mean Max_aqi -", yr), xaxt = "n")
+axis(1, at = 1:12)
+
+for (i in seq_along(cities)) {
+  ct <- cities[i]
+  dc <- subset(d, city == ct)
+  dc <- dc[order(dc$month_num), ]
+
+  lines(dc$month_num, dc$max_aqi, lwd = 2, col = cols[i])
+  points(dc$month_num, dc$max_aqi, pch = 16, cex = 0.6, col = cols[i])
+}
+
+legend("topright", legend = cities, col = cols, lty = 1, lwd = 2, bty = "n")
+
+
+
+```
+
+```{r}
+
+######## 2024 #########
+
+
+test_full$month_num <- as.integer(format(test_full$date, "%m"))
+
+# Monthly mean max_aqi per city
+m <- aggregate(max_aqi ~ year + month_num + city, data = test_full, mean, na.rm = TRUE)
+
+
+
+
+yr <- 2024
+d <- subset(m, year == yr)
+
+cities <- sort(unique(d$city))
+cols <- 1:length(cities)
+
+plot(NA, xlim = c(1, 12), ylim = range(d$max_aqi, na.rm = TRUE),
+     xlab = "Month", ylab = "Mean max_aqi",
+     main = paste("Monthly Mean Max_aqi -", yr), xaxt = "n")
+axis(1, at = 1:12)
+
+for (i in seq_along(cities)) {
+  ct <- cities[i]
+  dc <- subset(d, city == ct)
+  dc <- dc[order(dc$month_num), ]
+
+  lines(dc$month_num, dc$max_aqi, lwd = 2, col = cols[i])
+  points(dc$month_num, dc$max_aqi, pch = 16, cex = 0.6, col = cols[i])
+}
+
+legend("topright", legend = cities, col = cols, lty = 1, lwd = 2, bty = "n")
+
+```
+Monthly mean max_aqi (2020 vs 2024): Both years exhibit a strong seasonal cycle, with the lowest monthly means in early autumn (about September-October) and a distinct summer peak (June-August) throughout all cities. In 2020, the peak is highest in July, hitting around 58-60 in the Bronx and 55-58 in Queens/Erie. Monroe remains lower (peak mid-40s). The summer peak in 2024 is a little earlier and wider (Jun–Aug), with Bronx 60 in June–July and Queens 57–58 in July–Aug. However, compared to 2020, Erie peaks lower (low-50s). The post-summer decline occurs in both years, but Monroe experiences a more severe late-year decline in 2024, dropping to roughly 30 in November, which is significantly lower than Monroe's 2020 minimum (mid-30s). In comparison to 2020, 2024 has a similar summer maximum but a smoother peak and greater late-year unpredictability (particularly in Monroe). Overall, Bronx and Queens are typically the highest cities in both years, while Monroe is the lowest.
+
+## Per city healthy and unhealthy days
+```{r }
+df_cnt2 <- data %>%
+  filter(year %in% c(2020, 2024),
+         !is.na(city), !is.na(aqi_level)) %>% #keeps only rows from 2020 and 2024 and removes missing city/aqi_level.
+  count(year, city, aqi_level, name = "n") #computes the number of days (n) for each combination of year × city × AQI level.
+
+ggplot(df_cnt2, aes(x = city, y = n, fill = aqi_level)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +  #draws the bars using the precomputed counts, places healthy and unhealthy bars side-by-side within each city.
+  geom_text(aes(label = n),
+            position = position_dodge(width = 0.8), #adds the count labels on top of each bar;
+            vjust = -0.4, size = 4) +
+  facet_wrap(~ year) +                              # makes separate panels for 2020 and 2024
+  labs(title = "Healthy vs Unhealthy days per city (2020 vs 2024)",
+       x = "City", y = "Number of days", fill = "AQI level") +
+  ylim(0, max(df_cnt2$n) * 1.15) +
+  theme_bw()
+
+
+```
+This bar graph compares the number of healthy and unhealthy days per city between 2020 and 2024 (a total of 366 days per city each year). The Bronx has the highest number of unhealthy days (137) and the lowest number of healthy days (229) in 2020, but Erie and Monroe have significantly better numbers (87 unhealthy and 279 healthy). In 2020, Queens is in the middle (259 healthy, 107 unhealthy). The trend changes in 2024: Erie also deteriorates significantly to 131 unhealthy days (235 healthy), and Queens becomes the worst with 142 unhealthy days (224 healthy). In 2024, the Bronx improves, falling from 137 to 120 unhealthy (healthy 229 to 246). Monroe barely changes (healthy 279 to 271, unhealthy 87 to 95). Overall, the Bronx had fewer unhealthy days in 2024 compared to 2020, whereas Queens and Erie had significantly more unhealthy days. This suggests a clear shifting of the cost of "bad-air days" throughout communities.
+
+## Unhealthy-day rate per city (2020 vs 2024) — % unhealthy days
+```{r}
+df_rate <- data %>%
+  filter(year %in% c(2020, 2024),
+         !is.na(city), !is.na(aqi_level)) %>%
+  mutate(year = factor(year)) %>%
+  group_by(year, city) %>%
+  summarise(
+    unhealthy_rate = mean(aqi_level == "unhealthy"),
+    .groups = "drop"
+  )
+
+ggplot(df_rate, aes(x = city, y = unhealthy_rate, fill = year)) +
+  geom_col(position = position_dodge(width = 0.8), width = 0.7) +
+  geom_text(aes(label = paste0(round(unhealthy_rate * 100, 1), "%")),
+            position = position_dodge(width = 0.8),
+            vjust = -0.4, size = 4) +
+  scale_y_continuous(labels = function(x) paste0(round(x * 100), "%"),
+                     limits = c(0, max(df_rate$unhealthy_rate) * 1.15)) +
+  labs(title = "Unhealthy-day rate by city (2020 vs 2024)",
+       x = "City", y = "Percent unhealthy days", fill = "Year") +
+  theme_bw()
+```
+The **percent of unhealthy days** by city in **2020 vs. 2024** is plotted below. From **37.4% (2020)** to **32.8% (2024)**, the Bronx shows improvement. Erie, on the other hand, deteriorates dramatically, going from **23.8% -> 35.8%** to the Bronx level. **Monroe** remains the lowest overall, with a tiny increase (**23.8% -> 26.0**). Queens has the **highest unhealthy-day rate** in 2024, with the largest decline occurring there, from **29.2% -> 38.8%**. In general, the burden of unhealthy days changes from being concentrated in the Bronx in 2020 to being **highest in Queens (and elevated in Erie)** in 2024.
+
+## Healthy vs Unhealthy Days 2020 vs 2024
+```{r }
+data$aqi_level <- factor(data$aqi_level, levels = c("healthy", "unhealthy"))
+
+tab <- table(data$year, data$aqi_level)
+
+op <- par(mar = c(5, 4, 3, 1))
+
+bp <- barplot(t(tab),
+              beside = TRUE,
+              col = c("steelblue", "tomato"),
+              ylab = "Number of days",
+              main = "Healthy vs Unhealthy days: 2020 vs 2024",
+              ylim = c(0, max(tab) * 1.20))
+
+
+legend("topright",
+          # move legend to the right
+       xpd = TRUE,              # allow outside plotting region
+       legend = colnames(tab),
+       fill = c("steelblue", "tomato"),
+       bty = "n")
+
+#adding count
+text(x = bp,
+     y = as.vector(t(tab)),
+     labels = as.vector(t(tab)),
+     pos = 3, cex = 0.9)
+
+par(op)
+
+
+```
+This graph compares all cities' healthy and unhealthy days between 2020 and 2024. There are 1046 healthy days and 418 unhealthy days overall in 2020; by 2024, there are 976 healthy days and 488 unhealthy days. Between 2020 and 2024, there was a net change of -70 healthy days and +70 unhealthy days, indicating a definite decline in overall air quality. The percentage of unhealthy days increased from roughly $28.6\%$ (418/1464) in 2020 to roughly $33.3\%$ (488/1464) in 2024 (the overall number of days remains constant). Overall, the frequency of unhealthy-air days in the four-city system is significantly higher in 2024 than it was in the COVID-period year.
+
+## Main_Pollutant counts: 2020 vs 2024
+```{r }
+
+d20 <- subset(train_full, year == 2020)
+d24 <- subset(test_full, year == 2024)
+
+# make sure pollutant order is consistent (so bars align)
+poll_levels <- c("PM2.5","O3","NO2","SO2","CO")
+d20$Main_Pollutant <- factor(train_full$Main_Pollutant, levels = poll_levels)
+d24$Main_Pollutant <- factor(test_full$Main_Pollutant, levels = poll_levels)
+
+cnt20 <- table(d20$Main_Pollutant)
+cnt24 <- table(d24$Main_Pollutant)
+
+# combine into a matrix: rows = pollutant, cols = year
+tab <- cbind("2020" = as.numeric(cnt20),
+             "2024" = as.numeric(cnt24))
+rownames(tab) <- poll_levels
+
+# plot (barplot uses columns as groups when beside=TRUE, so transpose)
+op <- par(mar = c(7, 4, 3, 1))
+bp <- barplot(t(tab),
+              beside = TRUE,
+              col = c("steelblue", "tomato"),
+              las = 2, cex.names = 0.9,
+              ylab = "Count",
+              main = "Main_Pollutant counts: 2020 vs 2024",
+              ylim = c(0, max(tab) * 1.20))
+
+legend("topright", legend = c("2020","2024"),
+       fill = c("steelblue","tomato"), bty = "n")
+
+# add counts on top of bars
+text(x = bp,
+     y = as.vector(t(tab)),
+     labels = as.vector(t(tab)),
+     pos = 3, cex = 0.85)
+
+par(op)
+
+```
+
+
+The dominating (primary) pollutants influencing the AQI between 2020 and 2024 is counted in this figure. PM2.5 is the primary driver in both years, staying extremely high and essentially unchanged (827 -> 819). The second driver, O3, likewise remains constant with a slight decrease (591 -> 575). NO2 shows a significant year shift, rising from 45 (2020) to 70 (2024), suggesting that NO₂ becomes a more frequent key contributor in 2024. With only one instance in 2020 and none in 2024, SO2 is practically nonexistent, and CO is never the primary pollutant in either year. Overall, PM2.5, O3, and NO2 continue to be the most important pollutants, while NO₂ becomes more significant in 2024.
+
+## Dominant pollutant share by month
+```{r }
+
+# define a stable legend order (edit if your data uses different labels)
+poll_levels <- c("PM2.5","O3","NO2","SO2","CO")
+
+df_poll <- data %>%
+  filter(year %in% c(2020, 2024),
+         !is.na(Main_Pollutant), !is.na(date)) %>%
+  mutate(year = factor(year),
+         month_lab = format(as.Date(date), "%Y-%m"),
+         Main_Pollutant = factor(Main_Pollutant, levels = poll_levels)) %>%
+  count(year, month_lab, Main_Pollutant, name = "n") %>%
+  group_by(year, month_lab) %>%
+  mutate(share = n / sum(n)) %>%
+  ungroup()
+
+ggplot(df_poll, aes(x = month_lab, y = share, fill = Main_Pollutant)) +
+  geom_col() +
+  facet_wrap(~ year, ncol = 1, scales = "free_x") +
+  scale_y_continuous(labels = function(x) paste0(round(x * 100), "%")) +
+  labs(title = "Monthly dominant pollutant share (winner per day)",
+       x = "Month", y = "Share of days", fill = "Main pollutant") +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+
+```
+The monthly percentage of days in 2020 compared to 2024 where each pollutant is the dominating "winner" (highest AQI contributor) is depicted in this figure. PM2.5 frequently accounts for the vast majority of days throughout the winter months (January–February and particularly November–December) in both years. O3 overtakes PM2.5 in the spring and early summer, peaks in March and June, and then gradually returns to PM2.5 in the late summer and autumn. In comparison to 2020, 2024 exhibits a little greater mid-to-late-year PM2.5 presence (particularly between July and October, when PM2.5's share is noticeably larger and O3's share is significantly lower than 2020). In both years, NO2 continues to contribute somewhat but consistently over the months, while SO2 is insignificant. Overall, both years exhibit the cyclical "swap" between winter PM2.5 and spring–summer O3, with 2024 leaning slightly more towards PM2.5 outside of the core O3 season.
+
+```{r }
+
+```
+
+## Relationship between Max_Aqi and all Predictors
+```{r }
+Xcols <- c("temp","humidity","windspeed",
+           "co_mean","no2_mean","so2_mean","pm2_5_mean","o3_mean")
+
+for (x in Xcols) {
+
+  # ---- 2020 clean pairs ----
+  x20 <- d20[[x]]
+  y20 <- d20$max_aqi
+  ok20 <- is.finite(x20) & is.finite(y20)
+  x20 <- x20[ok20]
+  y20 <- y20[ok20]
+
+  # ---- 2024 clean pairs ----
+  x24 <- d24[[x]]
+  y24 <- d24$max_aqi
+  ok24 <- is.finite(x24) & is.finite(y24)
+  x24 <- x24[ok24]
+  y24 <- y24[ok24]
+
+  # plot 2020 points
+  plot(x20, y20, pch=16, cex=0.4, col="blue",
+       xlab=x, ylab="max_aqi", main=paste("All cities -", x))
+
+  # add 2024 points
+  points(x24, y24, pch=16, cex=0.4, col="red")
+
+  if (length(x20) > 10 && length(unique(x20)) > 5) {
+    lines(lowess(x20, y20), col="blue", lwd=2)
+  }
+  if (length(x24) > 10 && length(unique(x24)) > 5) {
+    lines(lowess(x24, y24), col="red", lwd=2)
+  }
+
+  legend("topleft", legend=c("2020","2024"),
+         col=c("blue","red"), pch=16, bty="n")
+}
+
+```
+
+**max_aqi** in all cities grows at high temperatures (70–90) in both years but is largely flat at mid-temperatures. In the hot range, 2024 is a bit more. Humidity in all cities is between 2020 and 2024, there is significant overlap and the relationship is almost flat. There is little correlation between humidity and max_aqi. Max_aqi is greater at low wind speeds and falls as wind increases in all cities. The trends between 2020 and 2024 are strikingly similar.In both years, all cities' co_mean, max_aqi rises with CO, with a more pronounced increase in 2020. 2024 is still positive, but at higher CO, it is a little flatter. In both years, all cities' max_aqi rises with NO₂, exhibiting a definite upward trend. At mid-high NO₂, 2020 is considerably steeper and higher. The association of so2 is weak with max_aqi generally because most values are close to zero. The SO₂ extremes in 2020 are higher than those in 2024. Max_aqi increases dramatically with PM2.5 in both years, indicating a strong positive correlation. The fitted lines show stability between 2020 and 2024 since they are extremely close. In every city, o3_mean shows U-shaped pattern, max_aqi increases at increased o3 and is lowest at 0.03–0.04. In the high o3 tail, 2024 is marginally higher.
+
+
+# 2020 vs 2024 (Seasonal Plots)
+```{r}
+
+prep_ts <- function(df, year_value){
+  df %>%
+    mutate(
+      date = as.Date(date),
+      year = year_value,
+      md   = format(date, "%m-%d"),
+      doy  = as.integer(strftime(date, "%j"))  # 1..366 (keeps correct order)
+    )
+}
+
+train_full <- prep_ts(train_full, 2020)
+test_full  <- prep_ts(test_full,  2024)
+
+
+# helper: aggregate to one value per day (averaging across cities if city_sel=="All")
+plot_data <- function(var, title){
+
+  df_day <- bind_rows(train_full, test_full) %>%
+    mutate(
+      doy  = as.integer(strftime(date, "%j")),
+      year = factor(year)   # IMPORTANT: make it discrete for manual colors
+    ) %>%
+    group_by(year, doy) %>%
+    summarise(value = mean(.data[[var]], na.rm = TRUE), .groups = "drop")
+
+  ggplot(df_day, aes(x = doy, y = value, color = year)) +
+    geom_line(linewidth = 0.7, na.rm = TRUE) +
+    scale_color_manual(values = c("2020" = "blue", "2024" = "red")) +
+    scale_x_continuous(
+      breaks = c(1, 32, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335),
+      labels = c("Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec")
+    ) +
+    labs(title = title, x = "Month", y = var) +
+    theme_minimal(base_size = 12) +
+    theme(legend.title = element_blank())
+}
+
+
+```
+
+
+1) PM2.5 plot (main pollutant)
+```{r, fig.width=14, fig.height=5}
+
+plot_pm25 <- plot_data("pm2_5_mean", "PM2.5 daily mean: 2020 vs 2024")
+plot_pm25
+
+
+```
+
+
+
+The main pollutant is PM2.5, which is higher in 2024 for most of the days. So by analyzing other plot and the seasonal plot of PM2.5 we can conclude that 2024 is more unhealthy year than 2020.  
+
+2) O3 plot
+```{r, fig.width=14, fig.height=5}
+
+plot_o3 <- plot_data("o3_mean", "O3 daily mean: 2020 vs 2024")
+plot_o3
+
+
+```
+
+
+3) NO2 plot
+```{r, fig.width=14, fig.height=5}
+
+plot_no2 <- plot_data("no2_mean", "NO2 daily mean: 2020 vs 2024")
+plot_no2
+
+```
+
+
+4) SO2 Plot
+
+```{r, fig.width=14, fig.height=5}
+
+plot_so2 <- plot_data("so2_mean", "SO2 daily mean: 2020 vs 2024")
+plot_so2
+
+```
+
+
+5) CO plot
+
+```{r, fig.width=14, fig.height=5}
+plot_co <- plot_data("co_mean", "CO daily mean: 2020 vs 2024")
+plot_co
+
+```
+
+
+```{r, fig.width=14, fig.height=5}
+
+windspeed <- plot_data("windspeed", "Windspeed: 2020 vs 2024")
+windspeed
+
+
+```
+
+
+```{r, fig.width=14, fig.height=5}
+
+temp <- plot_data("temp", "Temperature: 2020 vs 2024")
+temp
+
+
+```
+
+```{r, fig.width=14, fig.height=5}
+
+humidity  <- plot_data("humidity", "Humidity : 2020 vs 2024")
+humidity 
+
+
+```
+
+This is the summary of the target variable, The minimum value of which is 12 and max value if 157.
+```{r }
+summary(data %>% select(max_aqi))
+```
+```{r }
+summary(train_full %>% select(max_aqi))
+```
+
+
+
+```{r }
+summary(test_full %>% select(max_aqi))
+```
+
+Now we are ready to build out first model which potentially a linear regression model with all the predictor.
+
+Please go to the Part 2 - **ImputedMissing.Rmd** to continue the analysis.
+

@@ -1,0 +1,494 @@
+---
+title: "Linear Regression"
+output:
+  html_document: 
+    toc: true
+    toc_float: true
+    toc_depth: 2
+    number_sections: true
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Load Libraries
+```{r }
+# installation of packages in case the user has not installed yet
+requirements <- c("leaflet", "car", "caTools", "tidyverse")
+
+for (req in requirements){
+  if (!require(req, character.only = TRUE)){
+      install.packages(req)
+  }
+}
+```
+
+# Load Datasets
+```{r}
+source("00_set_up.R")
+
+train_full<- readRDS("train_all_2020_impute.rds")
+test_full  <- readRDS("test_all_2024_impute.rds")
+```
+
+```{r }
+na_counts <- colSums(is.na(train_full))
+na_counts <- na_counts[na_counts > 0]
+
+for (nm in names(na_counts)) {
+  cat(nm, ":", na_counts[nm], "\n")
+}
+```
+
+
+```{r }
+na_counts <- colSums(is.na(test_full))
+na_counts <- na_counts[na_counts > 0]
+
+for (nm in names(na_counts)) {
+  cat(nm, ":", na_counts[nm], "\n")
+}
+```
+
+
+
+
+```{r}
+summary(train_full)
+```
+
+```{r}
+summary(test_full)
+
+```
+
+# Linear Regression
+
+Let’s build our first Linear Regression Model.
+```{r }
+lm_full <- lm(max_aqi ~ city + temp + humidity + windspeed +
+               co_mean + no2_mean + so2_mean + pm2_5_mean + o3_mean,
+              data = train_full)
+summary(lm_full)
+```
+By the summary, we can see that the model $R^2$ tells us that we are able to explain around the $79.57\%$ percent of the total variablity of the data also the Adjusted R-squared which penalises the complexity of our model tells us the same story.
+
+Let’s interpret the complete model by first specifying what categorical variables are contained in the intercept:
+
+- city = Bronx
+
+The intercept explains the mean of max_aqi with the cited values of the categorical predictors and the value of the eight numerical predictors:
+
+- co_mean = 0
+- no2_mean = 0
+- so2_mean = 0
+- pm2_5_mean = 0
+- o3_mean = 0
+
+Speaking about a little bit about the p_value we can mention that:
+
+**City effects (relative to the reference city)**
+
+- **cityErie** and **cityMonroe** have all strongly significant p-value, this indicate that - keeping weather, and pollutants fixed—the expected $max_aqi$ in Erie and Monroe is significantly lower than the reference city (negative coefficients).keeping month, weather, and pollutants fixed—the expected $max_aqi$ in Erie and Monroe is significantly lower than the reference city (negative coefficients). **cityQueens** is not significant (p ≈ 0.1883), so we do not have evidence that Queens differs from the reference city after controlling for the other predictors.
+
+
+**Meteorology (weather predictors)**
+- **temp** is significant but not so much with a negative coefficient (p ≈ 0.00309). Therefore, higher temperature is responsible for lower **max_aqi** when pollutants + city are constant.
+
+- **humidity** and **windspeed** are not significant (p = 0.92926 and p = 0.15541), therefore these predictors doesnot show any linear effect when the other predictors are included.
+
+**Pollutant predictors**
+- **pm2_5_mean** and **o3_mean** are extremely significant with a very high positive coefficint. Higher **pm2_5_mean** and **o3_mean** strongly increases max_aqi. These two are the dominant of the model.
+
+- **co_mean** is also strongly significant but with negative coefficient. This does not mean CO is “good”; it typically reflects correlation/multicollinearity among pollutants and the fact that the coefficient is a conditional effect given PM2.5 and O3 in the model.
+
+- **no2_mean** and **so2_mean** are not significant.
+
+
+At this point we can analyse the regression diagnostic plots:
+
+Now We recall that linear regression makes several assumptions about the data, such as :
+
+1. **Linearity of the data:** The relationship between the predictor (x) and the outcome (y) is assumed to be linear.
+2. **Normality of residuals:**  The residual errors are assumed to be normally distributed.
+3. **Homogeneity of residuals variance:** The residuals are assumed to have a constant variance (homoscedasticity)
+4. **Independence of residuals error terms**
+
+We should check whether or not these assumptions hold true. Potential problems include:
+
+- **Non-linearity** of the outcome - predictor relationships
+- **Heteroscedasticity** Non-constant variance of error terms.
+- **Presence of influential values** in the data that can be:
+  - **Outliers**: extreme values in the outcome (y) variable
+  - **High-leverage points**: extreme values in the predictors (x) variable
+
+All these assumptions and potential problems can be checked by producing some diagnostic plots visualizing the residual errors.
+
+```{r }
+par(mfrow=c(2,2))
+plot(lm_full)
+```
+1. **Residuals vs Fitted Plot:** Generally used to check the linear relationship assumptions, this is explianed by the straight horizontal red line at zero level. In our case, the red line is good (at zero level) for fitted_values upto 60 but then starts to go to the negative direction (negative residuals). That means if the fitted values are higher, residual is decreasing. This means the model is missing non-linearity and/or interactions.
+At higher fitted values, residuals become mostly negative that means over-predicts when it predicts high. So, our model, fits the “middle AQI” region okay, but behaves poorly in the high-AQI region
+2. **Q-Q Residuals Plot:** This figure, commonly known as the quantile-quantile residual plot, indicates whether or not the residuals are normally distributed. We can argue that they are normally distributed if they follow the dotted red line, but not in our situation.  Later on, we will observe in greater depth.
+3. **Scaled-Location / Spread-Location plot:** indicates whether the residuals are distributed equally among the predictors. This is the evaluation of equal variance, or homoscedasticity. In our plot, the red line goes upward and the points “fan out” as fitted values increase - errors get larger when predicted AQI is high.
+4. **Residuals VS Leverage plot**: It helps in locating high leverage spots and outliers that have an impact on the regression line using Cook's distance. In our case, Since the majority of the data has low leverage, everything is generally fine. It's not totally flawless because you should check and report a few possibly significant points. 
+
+
+```{r }
+qqPlot(residuals(lm_full))
+```
+Much clearly the qqPlot tells that the data the residuals are not normally distributed indeed are moderately right skewed. Thus we can’t trust the p-values and the estimation of the coefficients.
+
+For curiosity we analyse in a better and much detailed plot the presence of influential points.
+```{r }
+influenceIndexPlot(lm_full, vars = "Cook")
+```
+For the vast majority of observations, Cook's distance is close to zero, indicating that most points have minimal impact on the fitted model. Cook's distance is significantly higher in a few examples (1310 and 1412), suggesting possibly significant outliers that should be investigated.
+
+
+Here instead we have a look at all plots of residuals vs predictors and again the plot of residuals vs fitted values that we already see.
+
+```{r }
+residualPlots(lm_full)
+```
+
+```{r}
+
+rstd_lm_full <- residuals(lm_full, type = "pearson") 
+yhat_lm_full <- fitted(lm_full)
+n_lm_full   <- length(rstd_lm_full)
+
+# 2) residuals vs fitted values
+ok <- is.finite(yhat_lm_full) & is.finite(rstd_lm_full)
+plot(yhat_lm_full[ok], rstd_lm_full[ok], pch=16, cex=0.6,
+     xlab="Fitted values", ylab="Pearson residuals",
+     main="LM: residuals vs fitted")
+abline(h=0, col="red", lwd=2)
+lines(lowess(yhat_lm_full[ok], rstd_lm_full[ok]), col="blue", lwd=2)
+
+# 1) residuals vs data index
+plot(1:n_lm_full, rstd_lm_full, pch=16, cex=0.6,
+     xlab="Data index", ylab="Standardized residuals",
+     main="Residuals vs index")
+abline(h=0, col="red", lwd=2)
+
+# 3) residuals vs predictors (one by one)
+train_full$city <- factor(train_full$city)
+Xcols <- c("city", "month", "temp","humidity","windspeed",
+           "co_mean","no2_mean","so2_mean","pm2_5_mean","o3_mean")
+
+for (x in Xcols) {
+  xx <- train_full[[x]]
+  ok <- is.finite(xx) & is.finite(rstd_lm_full)
+
+  plot(xx[ok], rstd_lm_full[ok], pch=16, cex=0.6,
+       xlab=x, ylab="Standardized residuals",
+       main=paste("Residuals vs", x))
+  abline(h=0, col="red", lwd=2)
+  lines(lowess(xx[ok], rstd_lm_full[ok]), col="blue", lwd=2)
+}
+```
+
+**Fitted values vs residuals** exhibit a significant decreasing trend, suggesting systematic bias or nonlinearity (mis-specification). Higher fitted values cause the spread to broaden, indicating heteroskedasticity. For **Index vs. residuals**, the residuals are primarily centred about zero, although they exhibit huge spike bursts at a number of indices, suggesting outliers and potential sequence effects. Across the index, variance is not entirely constant. **Residuals vs. city**, Queens has the biggest distribution and most extreme residuals, suggesting a weaker fit there, while other cities have medians close to zero. There are fewer extreme variances in Bronx, Erie, and Monroe. **Month-wise, residuals** are approximately centred at zero; however, mid-year months (6–8) exhibit greater dispersion and more positive outliers. This suggests that the model does not adequately account for seasonal structure. **Temperature**-related heteroskedasticity is indicated by residuals that remain close to zero at mild temperatures but fan out at higher temperatures (≈70–90). Bias at the hot end is suggested through a little negative smooth trend. **Residuals versus humidity**: There is just a slight trend throughout humidity, and residuals are roughly symmetric about zero. Overall humidity impacts appear to be minor in residual structure, with a few big outliers mostly occurring at mid-humidity levels (≈50–70).
+
+
+```{r}
+rse_lm <- sigma(lm_full)
+rse_lm
+```
+```{r}
+pred_lm_full <- predict(lm_full, newdata = test_full)
+
+rmse_lm_full <- rmse(test_full$max_aqi, pred_lm_full)
+rmse_lm_full
+```
+
+
+## Removing the influential points from the base LM model
+
+```{r }
+# List the most influential points
+cd <- cooks.distance(lm_full)
+n  <- length(cd)
+thr <- 4/n
+
+thr
+which(cd > thr) # points above threshold
+head(sort(cd, decreasing=TRUE), 10)
+
+```
+
+```{r}
+n
+```
+
+
+```{r }
+mf <- model.frame(lm_full)
+
+top_idx <- order(cd, decreasing=TRUE)[1:10]
+top_idx
+
+# See the top rows used by the model:
+mf[top_idx, ]
+
+```
+Drop top 5 data points which have larger cook distances. The  refit the model on this dropped dataset.
+```{r }
+
+# remove 5 influential points
+
+top5 <- order(cd, decreasing=TRUE)[1:5]
+fit_drop <- update(lm_full, data = mf[-top5, ])  # refit on model-used data
+
+summary(lm_full)$coefficients[,1]
+
+```
+
+```{r }
+summary(fit_drop)$coefficients[,1]
+```
+If coefficients barely change - influential points exist but model is stable.
+If they change a lot -> “LM is sensitive; we should consider GAM / ridge / robust regression. Here in this case the coef changes a lot, so we should go for other models.
+
+
+```{r }
+influenceIndexPlot(fit_drop, vars = "Cook")
+```
+
+
+```{r}
+par(mfrow=c(2,2))
+plot(fit_drop)
+
+```
+Dropping the extreme cook distant points does not improve the model.
+
+```{r }
+qqPlot(residuals(fit_drop))
+```
+
+
+
+```{r}
+pred_fit_drop <- predict(fit_drop, newdata = test_full)
+
+rmse_fit_drop <- rmse(test_full$max_aqi, pred_lm_full)
+rmse_fit_drop
+```
+
+```{r}
+resid_aqi_drop <- test_full$max_aqi - pred_fit_drop
+rse_fit_drop <- sqrt(sum(resid_aqi_drop^2, na.rm = TRUE) / (sum(!is.na(resid_aqi_drop)) - 1))
+rse_fit_drop
+```
+
+
+
+Let’s have a look at the possible **power transformation** of the response.
+
+# BOX_COX LM
+
+```{r }
+powerTransform(lm_full)
+```
+Checking **multicollinearity**
+
+When a predictor variable can be predicted by a linear combination of multiple predictors, this is known as multicollinearity. This issue may make the coefficient unstable and untrustworthy, and when multicollinearity is present, the regression coefficients' standard errors typically rise. Additionally, greater standard errors result in larger confidence intervals and less accuracy when determining the true values of the coefficients.
+
+```{r }
+vif(lm_full)
+```
+Multicollinearity with GVIF suggests that all adjusted values are below 3 (max ≈ 2.1576), so collinearity is low and coefficient estimates should be reasonably stable.
+
+```{r }
+lambda <- 0.4494224  
+# Box-Cox transform of Y
+train_full$y_bc <- (train_full$max_aqi^lambda - 1) / lambda
+
+lm_bc <- lm(y_bc ~ city + temp + humidity + windspeed +
+               co_mean + no2_mean + so2_mean + pm2_5_mean + o3_mean,
+              data = train_full)
+summary(lm_bc)
+```
+Now remember that we can’t compare the $R^2$ with the previous model since in the last one the response is on a different scale.
+ 
+Now we analyse the regression diagnostic plots for the log response model.
+
+```{r }
+par(mfrow=c(2,2))
+plot(lm_bc)
+```
+
+
+```{r }
+qqPlot(residuals(lm_bc))
+```
+Residuals are approximately Normal in the center, but the tails deviate and a few outliers remain, so inference should be treated cautiously. That can make p-values and confidence intervals a bit optimistic.
+```{r }
+influenceIndexPlot(lm_bc, vars = "Cook")
+```
+
+```{r }
+residualPlots(lm_bc)
+```
+
+
+```{r}
+pred_lm_bc <- predict(lm_bc, newdata = test_full)
+
+
+# inverse Box-Cox (back to AQI)
+tmp <- lambda * pred_lm_bc + 1
+tmp[tmp < 0] <- NA                    # guard (should rarely happen)
+pred_aqi_lm_bc <- tmp^(1/lambda)
+
+
+rmse_lm_bc <- rmse(test_full$max_aqi, pred_aqi_lm_bc)
+rmse_lm_bc
+```
+
+```{r}
+resid_lm_bc <- test_full$max_aqi - pred_aqi_lm_bc
+rse_lm_bc <- sqrt(sum(resid_lm_bc^2, na.rm = TRUE) / (sum(!is.na(resid_lm_bc)) - 1))
+rse_lm_bc
+```
+
+The model didnot improve rather the rmse is decreased.
+
+## Remove Influential Points from Box-Cox LM
+
+```{r }
+mf <- model.frame(lm_bc)
+
+top_idx <- order(cd, decreasing=TRUE)[1:10]
+top_idx
+
+# See the top rows used by the model:
+mf[top_idx, ]
+
+```
+
+removing top 5 influential points and refit the powerTransform model again.
+```{r }
+
+# remove influential points
+
+top5 <- order(cd, decreasing=TRUE)[1:5]
+fit_drop_bc <- update(lm_bc, data = mf[-top5, ])  # refit on model-used data
+
+summary(lm_bc)$coefficients[,1]
+
+```
+
+```{r }
+summary(fit_drop_bc)$coefficients[,1]
+```
+
+```{r }
+influenceIndexPlot(fit_drop_bc, vars = "Cook")
+```
+
+
+```{r}
+par(mfrow=c(2,2))
+plot(fit_drop_bc)
+
+```
+
+
+```{r }
+qqPlot(residuals(fit_drop_bc))
+```
+
+
+```{r}
+pred_fit_drop_bc <- predict(fit_drop_bc, newdata = test_full)
+
+
+# inverse Box-Cox (back to AQI)
+tmp <- lambda * pred_fit_drop_bc + 1
+tmp[tmp < 0] <- NA                    # guard (should rarely happen)
+pred_aqi_drop_bc <- tmp^(1/lambda)
+
+
+rmse_fit_drop_bc <- rmse(test_full$max_aqi, pred_aqi_drop_bc)
+rmse_fit_drop_bc
+```
+
+
+```{r}
+resid_drop_bc <- test_full$max_aqi - pred_aqi_drop_bc
+rse_drop_bc <- sqrt(sum(resid_drop_bc^2, na.rm = TRUE) / (sum(!is.na(resid_drop_bc)) - 1))
+rse_drop_bc
+```
+
+
+# LM with Month
+
+```{r }
+lm_month <- update(lm_full, . ~ . + month)
+summary(lm_month)
+```
+After  including the predictor **month**, the coefficient of **temp** has been dramatically decreased. Regarding **month** itself, most of the months are significant except month 6 and 12 and has negative coefficient of all the months. So, there are relationships among predictors.
+
+```{r }
+par(mfrow=c(2,2))
+plot(lm_month)
+```
+
+```{r }
+qqPlot(residuals(lm_month))
+```
+The Q-Q plot shows some improvement kin the left tail.
+
+```{r }
+influenceIndexPlot(lm_month, vars = "Cook")
+```
+
+```{r }
+residualPlots(lm_month)
+```
+
+```{r}
+pred_lm_month <- predict(lm_month, newdata = test_full)
+
+
+rmse_lm_month  <- rmse(test_full$max_aqi, pred_lm_month)
+rmse_lm_month 
+```
+
+
+
+```{r}
+resid_lm_month <- test_full$max_aqi - pred_lm_month
+rse_lm_month <- sqrt(sum(resid_lm_month^2, na.rm = TRUE) / (sum(!is.na(resid_lm_month)) - 1))
+rse_lm_month
+```
+
+After adding month the $R^2$ and the rmse are improved.
+
+```{r}
+c(rmse_lm_full= rmse_lm_full,
+  rmse_fit_drop= rmse_fit_drop,
+  rmse_lm_bc= rmse_lm_bc,
+  rmse_fit_drop_bc= rmse_fit_drop_bc,
+  rmse_lm_month= rmse_lm_month)
+```
+
+```{r}
+c(rse_lm = rse_lm,
+  rse_fit_drop= rse_fit_drop,
+  rse_lm_bc= rse_lm_bc,
+  rse_drop_bc= rse_drop_bc,
+  rse_lm_month= rse_lm_month)
+
+```
+
+
+
+Therefore, we are in a situation where the linearity assumption are not met, so we need to consider more robust model like **GAM** and/or **Interaction**.
+
+
+Please go to the Part 4 - **GAM** to continue the analysis.

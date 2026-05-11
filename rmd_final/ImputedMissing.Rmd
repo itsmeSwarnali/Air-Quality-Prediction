@@ -1,0 +1,165 @@
+---
+title: "PCA Imputation"
+output:
+  html_document: 
+    toc: true
+    toc_float: true
+    toc_depth: 2
+    number_sections: true
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+```{r}
+# installation of packages in case the user has not installed yet
+requirements <- c("nnet", "MASS", "e1071", "class", "leaps", "glmnet", "car", "caTools",
+              "pROC", "summarytools", "dplyr", "ggplot2", "tidyverse", "lubridate",
+              "mapview", "sf", "geojsonio", "leaflet", "broom", "gridExtra",
+              "effects")
+
+for (req in requirements){
+  if (!require(req, character.only = TRUE)){
+      install.packages(req)
+  }
+}
+
+library(mgcv)
+```
+
+
+```{r}
+source("00_set_up.R")
+
+na_counts <- colSums(is.na(data))
+na_counts <- na_counts[na_counts > 0]
+
+for (nm in names(na_counts)) {
+  cat(nm, ":", na_counts[nm], "\n")
+}
+
+```
+
+# Preprocessing and Feature Engineering 
+
+First, the dataset was split into training (2020) and test (2024).
+The date field was handled as a proper Date, and a month feature was engineered as a 12-level factor (“01”–“12”), which is useful both for seasonality in models and for grouped imputation.
+
+There are some missing values in no2_mean, o3_mean, so2_mean, co_mean and their AQI variants. Instead of being arbitrarily eliminated, missing values were then examined and filled using PCA.
+
+
+A missingness GLM (missing indicator ~ city + month + temp + humidity + windspeed) suggested patterned missingness for NO₂/O₃/SO₂ (associated to city/month/temp/humidity/windspeed), while CO missingness looked random.
+
+The project employed a straightforward, comprehensible imputation: PCA imputation calculated on the training set, subsequently used to both train and test because patterned missingness can skew outcomes if we delete rows.
+
+As only the mean  concentrations of the pollutants are used in building the final model, the missing values are filled in only those columns.
+
+
+## Dealing with Missing Values
+
+```{r }
+
+## Fit GLM for Missing Values
+
+vars <- c("no2_mean","o3_mean", "so2_mean", "co_mean")
+preds <- c("city","month","temp","humidity","windspeed")
+
+for (v in vars) {
+
+  miss_name <- paste0("miss_", v)
+  data[[miss_name]] <- as.integer(is.na(data[[v]]))
+
+  dat <- data[, c(miss_name, preds)]
+  dat <- dat[complete.cases(dat), ]
+
+  fit <- glm(as.formula(paste(miss_name, "~", paste(preds, collapse=" + "))),
+             data = dat, family = binomial)
+
+  cat("\n============================\n")
+  cat("Missingness model for:", v, " (n =", nrow(dat), ")\n")
+  cat("============================\n")
+
+  print(summary(fit))   # <-- this includes stars automatically
+}
+
+
+
+```
+The missing values of NO2 shows a pattern with city Monroe and humidity, it also have some relationship with the predictor windspeed.
+
+On the other hand, o3_mean has a pattern with cities Erie, Queens, and Bronx. It shares the relationship with month10 and month12.
+
+The missing values of so2 also demonstrates a pattern with cities Monroe and Queens, and a little bit with temperature.
+
+The previous analysis tells that co_mean missing value is random and doesnot have any pattern, thus, doesnot share any relationship with other predictors. 
+
+
+Therefore, NO₂ / O₃ / SO₂ missingness is patterned (city/month/weather effects), so dropping all rows with any of those missing can introduce bias (and also removes more data). So I imputed using train-based city×month medians and optionally included missingness indicators.
+
+### Applying PCA for Imputation
+```{r}
+
+library(missMDA)
+
+# include variables that help explain pollutants
+
+vars_pca <- c("co_mean","no2_mean","so2_mean","o3_mean",
+              "pm2_5_mean","temp","humidity","windspeed")
+
+
+vars_pca <- vars_pca[vars_pca %in% names(train_all)]
+
+Xtr <- data.matrix(train_all[, vars_pca])
+Xte <- data.matrix(test_all[,  vars_pca])
+
+# number of principal components
+ncp <- estim_ncpPCA(Xtr, ncp.max = 6)$ncp
+
+# impute TRAIN
+imp_tr <- imputePCA(Xtr, ncp = ncp, scale = TRUE)
+train_all[, vars_pca] <- imp_tr$completeObs
+
+# impute TEST (separately)
+imp_te <- imputePCA(Xte, ncp = ncp, scale = TRUE)
+test_all[, vars_pca] <- imp_te$completeObs
+
+# check remaining NA (should be 0)
+colSums(is.na(train_all[, vars_pca]))
+colSums(is.na(test_all[,  vars_pca]))
+
+
+```
+
+
+
+```{r}
+
+saveRDS(train_all, "train_all_2020_impute.rds")
+saveRDS(test_all,  "test_all_2024_impute.rds")
+
+# later
+train_full <- readRDS("train_all_2020_impute.rds")
+test_full  <- readRDS("test_all_2024_impute.rds")
+
+```
+
+```{r}
+# first 6 rows
+head(train_full)
+```
+
+```{r}
+colSums(is.na(train_full))
+colSums(is.na(test_full))
+```
+
+```{r}
+na_counts <- colSums(is.na(train_full))
+na_counts <- na_counts[na_counts > 0]
+
+for (nm in names(na_counts)) {
+  cat(nm, ":", na_counts[nm], "\n")
+}
+```
+After the imputation of the missing  values, I have build the first baseline Linear regression model, Please go to the Part 3 - **lm.Rmd**  to continue the analysis.

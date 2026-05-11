@@ -1,0 +1,920 @@
+---
+title: "GAM"
+output:
+  html_document: 
+    toc: true
+    toc_float: true
+    toc_depth: 2
+    number_sections: true
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Load Libraries
+```{r }
+# installation of packages in case the user has not installed yet
+requirements <- c("nnet", "MASS", "e1071", "class", "leaps", "glmnet", "car", "caTools",
+              "pROC", "summarytools", "dplyr", "ggplot2", "tidyverse", "lubridate",
+              "mapview", "sf", "geojsonio", "leaflet", "broom", "gridExtra",
+              "effects")
+
+for (req in requirements){
+  if (!require(req, character.only = TRUE)){
+      install.packages(req)
+  }
+}
+
+library(mgcv)
+
+```
+
+# Load Set_Up File
+```{r}
+
+source("00_set_up.R")
+# later
+train_full <- readRDS("train_all_2020_impute.rds")
+test_full  <- readRDS("test_all_2024_impute.rds")
+
+```
+
+
+```{r}
+na_counts <- colSums(is.na(train_full))
+na_counts <- na_counts[na_counts > 0]
+
+for (nm in names(na_counts)) {
+  cat(nm, ":", na_counts[nm], "\n")
+}
+```
+
+
+```{r}
+na_counts_test <- colSums(is.na(test_full))
+na_counts_test <- na_counts_test[na_counts_test > 0]
+
+for (nm in names(na_counts_test)) {
+  cat(nm, ":", na_counts_test[nm], "\n")
+}
+```
+
+```{r}
+summary(train_full)
+
+head(train_full)
+```
+
+```{r}
+summary(test_full)
+```
+We have decided to switch to an efficient model which can capture the non-lineariy because the AQI process is not purely linear: 
+
+1 **Evidence of non-linearity**: According to scatterplots and residual patterns, a straight line does not adequately represent the connection between **max_aqi** and **pollutants**, particularly **PM2.5_mean** and **o3_mean**.
+
+2 **Better fit without losing interpretability**: In contrast to black-box models, GAM enhances prediction reliability by permitting smooth non-linear effects while maintaining a clear interpretation using partial effect plots.
+
+3. **Environmental realism**: GAM natively captures the thresholds and saturation effects that are frequently present in air pollution phenomena (e.g., once PM2.5 is high, AQI increases fast).
+
+For a "Statistical Inference & Learning" project, GAM is therefore a good compromise because it is more adaptable than LM while remaining inferential and explicable.
+
+A GAM resembles linear regression. However, it enables the data learn a smooth, perhaps curved influence rather than constraining each numerical predictor (like linear regression) to have a straight-line effect.
+
+**s()** function helps a straight line to be smooth and bend, thus allows the model estimate smooth curve. In GAM, we can get a function **f(x)** that can bend as its own way.
+
+Many real relationships in air quality are non-linear, for example:
+
+- **pm_2_5_mean** may have a slow effect at low levels but a strong effect after a particular value.
+- **o3_mean** can behave differently in different ranges (flat -> then sharp rise)
+- **Temperature** effects can be weak in mid-range but stronger at extremes
+
+In LM, if *pm2_5_mean** increases by 1 unit, **max_aqi** always increases by the same amount.
+In GAM, *pm2_5_mean** increases by 1 unit, the effect on *max_aqi** depends on where you are on the **pm2_5_mean** scale.
+
+So GAM keeps the model additive and interpretable, but removes the “must be linear” restriction.
+
+# Simple GAM
+```{r}
+fit_gam <- gam(max_aqi ~ city + 
+                  s(pm2_5_mean, k=6) +
+                  s(o3_mean,     k=6) +
+                  s(so2_mean,    k=6) +
+                  s(temp,        k=6) +
+                  no2_mean + co_mean + humidity + windspeed,
+                data = train_full)
+
+summary(fit_gam)
+```
+Here, in the **GAM** function, the dimension of the basis function is kept as 6, which means that represent the unknown smooth function of predictors using a basis with 6 building blocks (basis functions). So instead of fitting a single straight line, the model fits a flexible curve, built as a weighted sum of those 6 basis functions.
+**k** controls the maximum complexity the curve is allowed to have, before penalization.
+- **Small k** -> curve can only be simple (few bends).
+- **Large k** -> curve can be more wiggly (more bends allowed), if the data really supports it.
+
+**edf**
+- **edf ≈ 1** -> the smooth is basically linear (no real curvature).
+- **larger edf** -> more curvature
+
+Key diagnostic rule:
+
+If edf is close to the maximum possible for that k, you likely set k too small (the model is “hitting the ceiling”).
+
+
+```{r}
+gam.check(fit_gam)
+
+```
+k′: the effective maximum complexity allowed for that smooth (after constraints).
+I set k=6, and for 1D smooths mgcv reports k′ ≈ 5 (normal).
+
+edf: the effective degrees of freedom actually used (how curvy the fitted smooth became).
+
+k-index: a diagnostic; should be ~ 1 if k is adequate. < 1 suggests k might be too small (model wants more flexibility).
+
+p-value: tests whether the pattern suggests k is too small.
+Small p-value (e.g., <0.05) ⇒ evidence k is too low.
+
+For **s(o3_mean)**, k is too small, edf = 4.99 is basically at the maximum (k′=5.00), k-index = 0.86 (well below 1), p-value < 2e-16 (very strong evidence).Therefore, the O₃ effect is trying to be more complex than the basis allows -> increase k for o3_mean.
+
+For **s(pm2_5_mean)**, probably increase k a little bit, edf = 4.91 is basically near to the maximum (k′=5.00). Safer to raise k moderately.
+
+For **s(so2_mean)** edf is far from the value if k' and k-index is near 1. 
+
+For **s(temp)**, edf is very far from k, so k = 5 is okay.
+
+# SImple GAM (Select K)
+```{r}
+fit_gam_k <- gam(max_aqi ~ city + s(pm2_5_mean, k=8) +
+                  s(o3_mean,     k=10) +
+                  s(so2_mean,    k=8) +
+                  s(temp,        k=5) +
+                  no2_mean + co_mean + humidity + windspeed,
+                data = train_full)
+
+summary(fit_gam_k)
+```
+Now we have fitted a GAM (Generalized Additive Model) with a Gaussian response.
+
+  - **Intercept** = 47.26 (highly significant)
+  - **City coefficients** all negative and significant.
+  - **no2_mean**, **co_mean** and **windspeed** are not statistically significant.
+  - **humidity**: mild evidence that higher humidity is associated with slightly lower max_aqi
+
+In GAM output, each smooth has:
+
+- **edf (effective degrees of freedom):** how flexible the fitted curve actually is
+    - **edf ≈ 1** → almost linear
+    - **higher edf** → more nonlinear “wiggly” curve
+
+- **F statistic & p-value:** large and small respectively if that smooth term contributes significantly.
+ 
+1. **s(pm2_5_mean)**: edf is 6.817 and p_value is very small means that PM2.5 has a **strong nonlinear 2. relationship** with *max_aqi**.
+3. **s(o3_mean)**: edf is 8.669 and p_value is very small means that o3 also has a **strong nonlinear relationship** with max_aqi.
+5. **s(so2_mean)**: not significant. **so2** is either weak in these cities/years or its information is redundant once other pollutants are included
+6. **s(temp)**: Its also has a significant effect with edf 3.525.
+
+The two main very substantial and significantly nonlinear components are **pm2_5_mean** and **o3_mean**. Temperature is important as well. However, after adjusting for other factors, *so2_mean** does not exhibit an additional significant impact.
+
+**Model Performance Matrics**
+
+  - **Adjusted $R^2$** is 0.888 which means that the model can explain about $89\%$ variability in max_aqi. For environmental data with noise this is quite strong.
+  - **Deviance explained** is $89\%$, another way of variance explanation. So, here, we can see that the model fits data well.
+
+The model explains around $89\%$ of the variance, indicating a strong predictive structure that is primarily caused by PM2.5 and O₃ nonlinearities. The remaining error is probably caused by daily unobserved factors.
+
+```{r}
+gam.check(fit_gam_k)
+```
+
+We increased the k for **PM_2_5_mean** and **o3_mean** to 8 and 10 respectively, meaning the model actually needed that flexibility. 
+
+
+According to the GAM model, the nonlinear effects of **PM_2_5_mean** and **o₃_mean**, both of which are very significant and have significant curvature (edf = 6–7), are the main drivers of max_aqi. When the other pollutants are taken into account, temperature also makes a considerable contribution with moderate nonlinearity (edf ≈ 3), but **so2_mean** does not add a significant predictive value. City effects, which show systematic variations between cities not entirely explained by the studied variables, are nonetheless significant. The model fits well overall (adjusted $R^2$ = 0.889; deviance explained ≈ $89\%$), indicating that the majority of the variability in air quality is captured by the selected pollutants and weather factors.
+```{r}
+#par(mfrow=c(2,2))
+#plot(fit_gam_k)
+
+plot(fit_gam_k, shade = TRUE, shade.col = "lightblue")
+```
+**s(pm2_5_mean)** the curve rises steadily which means higher **pm_2_5_mean** strong increase of **max_aqi**. Again there is a curvature as its edf is almost $6.786$. So, the relationship of **maq_aqi** and **pm_2_5_mean** is strong and consistent. 
+
+**s(o3_mean)** nearly flat at low **o₃_mean**, then sharp upward increase after some threshold-ish region (around ~0.05–0.06 in the scale). This “flat then jump” shape says: **o₃_mean** becomes very influential only when it gets high. Bands widen at the far right -> fewer data points at high **o₃_mean**, so less certainty. Therefore, **o₃_mean** has a nonlinear “risk escalation” effect at higher values.
+
+**s(so2_mean)** the line is almost flat, small changes only. Consistent with our summary where **s(so2_mean)** smooth was not significant. After controlling for **s(pm2_5_mean)** and **s(o3_mean)**, **s(so2_mean)** adds little extra predictive power in this model (in the data/time).
+
+**s(temp)**, the curve is very close to flat. Even if p-value was significant in summary, the effect size is small in AQI units (flat curve = small contribution). Temperature’s additional contribution is minor compared to **s(pm2_5_mean)** and **s(o3_mean)**.
+
+
+```{r}
+qqPlot(residuals(fit_gam_k))
+```
+Most points (the big chunk around the center) lie close to the diagonal → most residuals behave roughly normal.
+
+Most points (the big chunk around the center) lie close to the diagonal → most residuals behave roughly normal. On the right  side, the severe big residual means the model cannot predict well when the **max_aqi** is higher. In the left tail, the residual is very low indicating that when *max_aqi** is very low, model predicts them very  high. This pattern usually means heavier tails than Normal (outliers / extreme days).
+
+Points 1316 and 1296: Those labels are observations with the largest deviations. Usually these are extreme high-AQI and lowest-AQI days that the model predictors can’t fully explain.
+
+
+```{r}
+rstd_gam <- residuals(fit_gam_k, type = "pearson") 
+yhat_gam <- fitted(fit_gam_k)
+n_gam    <- length(rstd_gam)
+
+# 1) residuals vs fitted values
+ok <- is.finite(yhat_gam) & is.finite(rstd_gam)
+plot(yhat_gam[ok], rstd_gam[ok], pch=16, cex=0.6,
+     xlab="Fitted values", ylab="Pearson residuals",
+     main="GAM: residuals vs fitted")
+abline(h=0, col="red", lwd=2)
+lines(lowess(yhat_gam[ok], rstd_gam[ok]), col="blue", lwd=2)
+
+
+# 2) residuals vs data index
+plot(1:n_gam, rstd_gam, pch=16, cex=0.6,
+     xlab="Data index", ylab="Standardized residuals",
+     main="Residuals vs index")
+abline(h=0, col="red", lwd=2)
+
+
+# 3) residuals vs predictors (one by one)
+train_full$city <- factor(train_full$city)
+
+Xcols <- c("city", "month", "temp","humidity","windspeed",
+           "co_mean","no2_mean","so2_mean","pm2_5_mean","o3_mean")
+
+for (x in Xcols) {
+  xx <- train_full[[x]]
+  ok <- is.finite(xx) & is.finite(rstd_gam)
+
+  plot(xx[ok], rstd_gam[ok], pch=16, cex=0.6,
+       xlab=x, ylab="Standardized residuals",
+       main=paste("Residuals vs", x))
+  abline(h=0, col="red", lwd=2)
+  lines(lowess(xx[ok], rstd_gam[ok]), col="blue", lwd=2)
+}
+
+
+```
+
+- **Residuals vs fitted**:The majority of residuals are centred around 0 (good). However, the model tends to slightly overestimate when the projected max AQI spikes (a bit of residual bias in the upper range), as the blue smooth line dips downwards slightly for bigger fitted values.
+- **Residuals vs index**: Although there are a few large outliers and some extreme days are poorly captured (common for AQI spikes), points appear pretty "random" around 0 (good: no strong time-order structure).
+- **Residuals vs city (boxplot)**: All cities' medians are near zero, which is fine, but some have greater spreads or outliers. Overall, the city impact is managed, but severe events differ by city.
+- **Residuals vs month**: A month smooth (cyclic) can be helpful because most months are centred around 0, but others have wider vertical spreads or outliers, which implies seasonality may still be inadequately recorded.
+- **Residuals vs humidity / no2_mean**: The model has already captured their contribution (or they are poor predictors in this model) because the smooth line is nearly flat around 0 -> no substantial leftover structure.
+- **Residuals vs co_mean / pm2_5_mean**: A small systematic deviation in the smooth line suggests that either the selected smooth (for PM2.5) or a simply linear impact (for CO) may not be sufficient, or that some interaction (for example, with windspeed/pm_2_5_mean or temp/month) could account for the residual pattern.
+- **Residuals vs so2_mean**: The majority of the data are concentrated at low SO₂ (strong skew), with a few distant points. Because **so2_mean** has numerous small values and a few infrequent spikes, it is difficult to identify the residual pattern in this case.
+- **Residuals vs temp**: The residual doesnot show any drift.
+
+The model is generally acceptable according to these plots, but upper-tail AQI days plus some seasonality and interaction structure still create patterns in the residuals. For this reason, the following models should try cyclic month smooth + interactions.
+
+
+```{r}
+
+pred_gam <- predict(fit_gam_k, newdata = test_full)
+
+rmse_fit_gam_k <- rmse(test_full$max_aqi, pred_gam)
+rmse_fit_gam_k
+```
+
+```{r}
+resid_aqi_gam <- test_full$max_aqi - pred_gam
+rse_fit_gam <- sqrt(sum(resid_aqi_gam^2, na.rm = TRUE) / (sum(!is.na(resid_aqi_gam)) - 1))
+rse_fit_gam
+
+```
+
+
+# GAM BOX_COX/powerTransform
+```{r}
+powerTransform(fit_gam_k)
+```
+
+```{r}
+lambda <- 0.4494224
+
+# Box-Cox transform of Y
+train_full$y_bc <- (train_full$max_aqi^lambda - 1) / lambda
+
+fit_gam_k_bc <- update(fit_gam_k, y_bc  ~ .)
+
+summary(fit_gam_k_bc)
+
+```
+
+```{r}
+plot(fit_gam_k_bc, shade = TRUE, shade.col = "lightblue")
+```
+
+
+```{r}
+par(mfrow=c(2,2))
+plot(fit_gam_k_bc)
+
+```
+
+
+```{r}
+qqPlot(residuals(fit_gam_k_bc))
+
+```
+
+The Q-Q plot is significantly improved after  applying the transformation on the target variable. there is only one point is outside the interval in the left tail and the right tail has been also improved.
+
+```{r}
+rstd_gam_bc <- residuals(fit_gam_k_bc, type = "pearson") 
+yhat_gam_bc <- fitted(fit_gam_k_bc)
+n_gam_bc    <- length(rstd_gam)
+
+# 2) residuals vs fitted values
+ok <- is.finite(yhat_gam_bc) & is.finite(rstd_gam_bc)
+plot(yhat_gam_bc[ok], rstd_gam_bc[ok], pch=16, cex=0.6,
+     xlab="Fitted values", ylab="Pearson residuals",
+     main="GAM: residuals vs fitted")
+abline(h=0, col="red", lwd=2)
+lines(lowess(yhat_gam_bc[ok], rstd_gam_bc[ok]), col="blue", lwd=2)
+
+# 1) residuals vs data index
+plot(1:n_gam_bc, rstd_gam_bc, pch=16, cex=0.6,
+     xlab="Data index", ylab="Standardized residuals",
+     main="Residuals vs index")
+abline(h=0, col="red", lwd=2)
+
+
+train_full$city <- factor(train_full$city)
+
+# 3) residuals vs predictors (one by one)
+Xcols <- c("city", "month", "temp","humidity","windspeed",
+           "co_mean","no2_mean","so2_mean","pm2_5_mean","o3_mean")
+
+for (x in Xcols) {
+  xx <- train_full[[x]]
+  ok <- is.finite(xx) & is.finite(rstd_gam_bc)
+
+  plot(xx[ok], rstd_gam_bc[ok], pch=16, cex=0.6,
+       xlab=x, ylab="Standardized residuals",
+       main=paste("Residuals vs", x))
+  abline(h=0, col="red", lwd=2)
+  lines(lowess(xx[ok], rstd_gam_bc[ok]), col="blue", lwd=2)
+}
+
+
+
+```
+
+```{r}
+#residualPlots(fit_gam_k_bc)
+```
+
+
+
+```{r}
+# predict on transformed scale
+pred_gam_k_bc <- predict(fit_gam_k_bc, newdata = test_full)
+
+# inverse Box-Cox (back to AQI)
+tmp <- lambda * pred_gam_k_bc + 1
+tmp[tmp < 0] <- NA                    # guard (should rarely happen)
+pred_aqi_bc <- tmp^(1/lambda)
+
+rmse_fit_gam_k_bc <- rmse(test_full$max_aqi, pred_aqi_bc)
+rmse_fit_gam_k_bc
+
+
+```
+
+
+But the rmse is decreased dramatically under transaformation.
+
+```{r}
+resid_gam_k_bc <- test_full$max_aqi - pred_aqi_bc
+rse_fit_gam_bc <- sqrt(sum(resid_gam_k_bc^2, na.rm = TRUE) / (sum(!is.na(resid_gam_k_bc)) - 1))
+rse_fit_gam_bc
+
+```
+
+
+# GAM MONTH (BOX_COX with Month -> adding seasonality)
+```{r}
+
+# 1) make numeric month (1..12)
+train_full$month_num <- as.integer(as.character(train_full$month))
+test_full$month_num  <- as.integer(as.character(test_full$month))
+
+
+# 2) update: keep everything, only add month smooth
+fit_gam_bc_month <- update(fit_gam_k_bc, . ~ . + s(month_num, bs = "cc", k = 12))   # makes it truly cyclic
+
+
+summary(fit_gam_bc_month)
+
+```
+Month is very significant and has relationship with temperature.
+
+```{r}
+plot(fit_gam_bc_month, shade = TRUE, shade.col = "lightblue")
+```
+
+```{r}
+qqPlot(residuals(fit_gam_bc_month))
+```
+
+```{r}
+rstd_gam_bc_month <- residuals(fit_gam_bc_month, type = "pearson") 
+yhat_gam_bc_month <- fitted(fit_gam_bc_month)
+n_gam_bc_month    <- length(rstd_gam_bc_month)
+
+# 2) residuals vs fitted values
+ok <- is.finite(yhat_gam_bc_month) & is.finite(rstd_gam_bc_month)
+plot(yhat_gam_bc_month[ok], rstd_gam_bc_month[ok], pch=16, cex=0.6,
+     xlab="Fitted values", ylab="Pearson residuals",
+     main="GAM: residuals vs fitted")
+abline(h=0, col="red", lwd=2)
+lines(lowess(yhat_gam_bc_month[ok], rstd_gam_bc_month[ok]), col="blue", lwd=2)
+
+# 1) residuals vs data index
+plot(1:n_gam_bc_month, rstd_gam_bc_month, pch=16, cex=0.6,
+     xlab="Data index", ylab="Standardized residuals",
+     main="Residuals vs index")
+abline(h=0, col="red", lwd=2)
+
+# 3) residuals vs predictors (one by one)
+
+train_full$city <- factor(train_full$city)
+
+Xcols <- c("city", "month", "temp","humidity","windspeed",
+           "co_mean","no2_mean","so2_mean","pm2_5_mean","o3_mean")
+
+for (x in Xcols) {
+  xx <- train_full[[x]]
+  ok <- is.finite(xx) & is.finite(rstd_gam_bc_month)
+
+  plot(xx[ok], rstd_gam_bc_month[ok], pch=16, cex=0.6,
+       xlab=x, ylab="Standardized residuals",
+       main=paste("Residuals vs", x))
+  abline(h=0, col="red", lwd=2)
+  lines(lowess(xx[ok], rstd_gam_bc_month[ok]), col="blue", lwd=2)
+}
+
+
+```
+
+
+```{r}
+
+pred_gam_bc_month <- predict(fit_gam_bc_month, newdata = test_full)
+
+# inverse Box-Cox (back to AQI)
+tmp <- lambda * pred_gam_k_bc + 1
+tmp[tmp < 0] <- NA                    # guard (should rarely happen)
+pred_aqi_month <- tmp^(1/lambda)
+
+
+rmse_fit_gam_bc_month <- rmse(test_full$max_aqi, pred_aqi_month)
+rmse_fit_gam_bc_month
+
+
+```
+Even after adding month the rmse is still high. It seems like need to add interaction.
+
+```{r}
+resid_aqi_month <- test_full$max_aqi - pred_aqi_month
+rse_fit_gam_bc_month <- sqrt(sum(resid_aqi_month^2, na.rm = TRUE) / (sum(!is.na(resid_aqi_month)) - 1))
+rse_fit_gam_bc_month
+
+```
+
+
+# GAM Interaction 1 (pm2_5_mean, windspeed)
+```{r}
+
+# Make sure city is factor
+train_full$city <- factor(train_full$city)
+
+
+fit_gam_pw <- gam(max_aqi ~ city + 
+                    s(month_num, bs = "cc", k = 12) +
+                    s(windspeed,  k=6) +
+                    s(pm2_5_mean, k=8) +
+                    ti(pm2_5_mean, windspeed, k=c(8,6)) +  # interaction
+                    s(o3_mean, k=10) +
+                    s(temp,   k=5) +
+                    no2_mean + co_mean + so2_mean + humidity, data=train_full)
+
+summary(fit_gam_pw)
+```
+
+```{r}
+plot(fit_gam_pw, shade = TRUE, shade.col = "lightblue")
+```
+
+```{r}
+qqPlot(residuals(fit_gam_pw))
+```
+
+```{r}
+rstd_gam_pw <- residuals(fit_gam_pw, type = "pearson") 
+yhat_gam_pw <- fitted(fit_gam_pw)
+n_gam_pw    <- length(rstd_gam)
+
+# 2) residuals vs fitted values
+ok <- is.finite(yhat_gam_pw) & is.finite(rstd_gam_pw)
+plot(yhat_gam_pw[ok], rstd_gam_pw[ok], pch=16, cex=0.6,
+     xlab="Fitted values", ylab="Pearson residuals",
+     main="GAM: residuals vs fitted")
+abline(h=0, col="red", lwd=2)
+lines(lowess(yhat_gam_pw[ok], rstd_gam_pw[ok]), col="blue", lwd=2)
+
+# 1) residuals vs data index
+plot(1:n_gam_pw, rstd_gam_pw, pch=16, cex=0.6,
+     xlab="Data index", ylab="Standardized residuals",
+     main="Residuals vs index")
+abline(h=0, col="red", lwd=2)
+
+# 3) residuals vs predictors (one by one)
+
+train_full$city <- factor(train_full$city)
+Xcols <- c("city", "month", "temp","humidity","windspeed",
+           "co_mean","no2_mean","so2_mean","pm2_5_mean","o3_mean")
+
+for (x in Xcols) {
+  xx <- train_full[[x]]
+  ok <- is.finite(xx) & is.finite(rstd_gam_pw)
+
+  plot(xx[ok], rstd_gam_pw[ok], pch=16, cex=0.6,
+       xlab=x, ylab="Standardized residuals",
+       main=paste("Residuals vs", x))
+  abline(h=0, col="red", lwd=2)
+  lines(lowess(xx[ok], rstd_gam_pw[ok]), col="blue", lwd=2)
+}
+
+
+
+```
+
+
+```{r}
+pred_gam_pw <- predict(fit_gam_pw, newdata = test_full)
+
+rmse_fit_gam_pw <- rmse(test_full$max_aqi, pred_gam_pw)
+rmse_fit_gam_pw
+```
+
+After Interaction, even though the Q-Q plot doesnot improve however the rmse is decreased and $R^2$ is increased. Therefore, interaction is very necessary for the  dataset.
+
+```{r}
+resid_gam_pw <- test_full$max_aqi - pred_gam_pw
+rse_fit_gam_pw <- sqrt(sum(resid_gam_pw^2, na.rm = TRUE) / (sum(!is.na(resid_gam_pw)) - 1))
+rse_fit_gam_pw
+
+```
+
+
+
+# GAM Interaction 2
+```{r}
+fit_gam_pw_o3_temp <- update(fit_gam_pw, .~. + ti(o3_mean, temp, k=c(10,5)))
+
+summary(fit_gam_pw_o3_temp)
+```
+
+```{r}
+plot(fit_gam_pw_o3_temp, shade = TRUE, shade.col = "lightblue")
+```
+
+```{r}
+qqPlot(residuals(fit_gam_pw_o3_temp))
+```
+
+
+```{r}
+rstd_gam <- residuals(fit_gam_pw_o3_temp, type = "pearson") 
+yhat_gam <- fitted(fit_gam_pw_o3_temp)
+n_gam    <- length(rstd_gam)
+
+# 1) residuals vs fitted values
+ok <- is.finite(yhat_gam) & is.finite(rstd_gam)
+plot(yhat_gam[ok], rstd_gam[ok], pch=16, cex=0.6,
+     xlab="Fitted values", ylab="Pearson residuals",
+     main="GAM: residuals vs fitted")
+abline(h=0, col="red", lwd=2)
+lines(lowess(yhat_gam[ok], rstd_gam[ok]), col="blue", lwd=2)
+
+# 2) residuals vs data index
+plot(1:n_gam, rstd_gam, pch=16, cex=0.6,
+     xlab="Data index", ylab="Standardized residuals",
+     main="Residuals vs index")
+abline(h=0, col="red", lwd=2)
+
+# 3) residuals vs predictors (one by one)
+
+train_full$city <- factor(train_full$city)
+Xcols <- c("city", "month", "temp","humidity","windspeed",
+           "co_mean","no2_mean","so2_mean","pm2_5_mean","o3_mean")
+
+for (x in Xcols) {
+  xx <- train_full[[x]]
+  ok <- is.finite(xx) & is.finite(rstd_gam)
+
+  plot(xx[ok], rstd_gam[ok], pch=16, cex=0.6,
+       xlab=x, ylab="Standardized residuals",
+       main=paste("Residuals vs", x))
+  abline(h=0, col="red", lwd=2)
+  lines(lowess(xx[ok], rstd_gam[ok]), col="blue", lwd=2)
+}
+
+```
+
+
+```{r}
+pred_gam_pw_o3_temp <- predict(fit_gam_pw_o3_temp, newdata = test_full)
+
+rmse_fit_gam_pw_o3_temp <- rmse(test_full$max_aqi, pred_gam_pw_o3_temp)
+rmse_fit_gam_pw_o3_temp
+```
+
+
+A great improvement on rmse, it is decreased a lot after including *O3* and **temp** interaction.
+
+```{r}
+resid_gam_pw_o3_temp <- test_full$max_aqi - pred_gam_pw_o3_temp
+rse_fit_gam_pw_o3_temp <- sqrt(sum(resid_gam_pw_o3_temp^2, na.rm = TRUE) / (sum(!is.na(resid_gam_pw_o3_temp)) - 1))
+rse_fit_gam_pw_o3_temp
+
+```
+
+
+
+# GAM interaction 3
+```{r}
+
+
+fit_gam_int3 <- gam(max_aqi ~ city + 
+                    s(o3_mean, k=10) +
+                    s(temp, k=5) +
+                    s(pm2_5_mean, k=8) +
+                    ti(o3_mean, pm2_5_mean, k=c(10, 8)) + 
+                    ti(month_num, temp, k=c(12,5)) +
+                    no2_mean + co_mean + so2_mean + humidity + windspeed,
+                    data = train_full)
+summary(fit_gam_int3)
+
+```
+**Interpreting the “Parametric coefficients”**:
+
+- **Intercept = 44.70**
+When every numerical predictor is zero, this is the expected max_aqi for the reference city, the Bronx.
+The intercept is mostly a baseline anchor rather than a significant "real-day" AQI since "zero" is unrealistic for variables like humidity and temperature.
+
+**City effects (relative to Bronx)**
+
+- **cityErie = -2.93 (p < 2e-16)**: After adjusting for all predictors, Erie's average AQI is                                               2.911560 points lower than the Bronx's.
+- **cityMonroe = -1.79 (p = 2.22e-05)**: Monroe is 1.634886 lower than Bronx.
+- **cityQueens = -1.27 (p = 1e-07)**: Queens is 1.626098 lower than Bronx.
+
+Therefore, Bronx continues to have the highest baseline among these even after controlling for weather and pollution. That can be easily understood by the plot "city vs max_aqi plot of 2020 vs 2024".
+
+
+**Linear pollutant/weather terms**
+
+- **no2_mean = +0.0388 (p = 0.0109)**: statistically significant positive effect; after adjusting for other predictors, increased  **no2_mean** has been associated to higher AQI.
+
+- **co_mean = -1.76 (p ≈ 0.08)**: borderline; Instead of a real "protective" effect, a negative sign can indicate collinearity or shared variation with PM2.5 and ozone.
+
+- **so2_mean, humidity, windspeed**: not significant here because p_values are very large.
+
+**Smooths**
+
+Very small p-values indicate the smooth term is needed.
+
+  - **s(o3_mean)**: edf = 7.124, p < 2e-16 -> strong nonlinear ozone effect
+  - **s(temp)**: edf = 1.000, p = 0.0138 -> temperature effect is basically linear (but significant)
+  - **s(pm2_5_mean)**: edf = 5.95, p < 2e-16 -> strong nonlinear PM2.5 effect
+  - **ti(o3_mean, pm2_5_mean)**: edf = 39.027, p < 2e-16 -> very strong, complex interaction between O3                                  and PM2.5
+  - **ti(month, temp)**: edf = 17.339, p = 5.29e-05 -> significant seasonal modulation of temperature                            effect
+  
+mgcv provides an approximate F-test for whether each smooth term contributes beyond noise. Here, in this model, **s(pm2_5_mean)** contributes the most and then **s(o3_mean)**. 
+
+**Model fit statistics**
+
+  - **Adjusted $R^2$** = 0.925, very high: the model explains a large portion of the variability in                              **max_aqi**.
+  - **Deviance explained** = $92.9\%$, similar meaning: strong explanatory performance.
+  
+With residual variability of about $3.9$ AQI units, the GAM obtains an excellent in-sample fit (adj. $R^2$ $0.925$; $92.9\%$ deviance explained).
+
+This GAM simulates daily max AQI using city effects, nonlinear smooth terms for O3, PM2.5, and temperature, and interactions to account for combined pollution impacts and seasonal temperature variability. The nonlinear impacts of PM2.5 and O3, particularly their interaction (ti(O3, PM2.5), p < 2e-16), greatly influence AQI sensitivity to one pollutant. Temperature is substantial but linear (edf ≈ 1). The month-temperature interaction is considerable, indicating seasonal variations in the temperature-AQI relationship. After accounting for these nonlinear structures, NO2 maintains a minor positive linear relationship with AQI, whereas SO2, humidity, and windspeed are not independently significant. Overall, the model has an outstanding fit (adj. $R^2$ = 0.925; deviance explained = $92.9\%$).
+  
+```{r}
+rstd_gam_int3 <- residuals(fit_gam_int3, type = "pearson") 
+yhat_gam_int3 <- fitted(fit_gam_int3)
+n_gam_int3   <- length(rstd_gam_int3)
+
+# 2) residuals vs fitted values
+ok <- is.finite(yhat_gam) & is.finite(rstd_gam_int3)
+plot(yhat_gam_int3[ok], rstd_gam_int3[ok], pch=16, cex=0.6,
+     xlab="Fitted values", ylab="Pearson residuals",
+     main="GAM: residuals vs fitted")
+abline(h=0, col="red", lwd=2)
+lines(lowess(yhat_gam_int3[ok], rstd_gam_int3[ok]), col="blue", lwd=2)
+
+# 1) residuals vs data index
+plot(1:n_gam_int3, rstd_gam_int3, pch=16, cex=0.6,
+     xlab="Data index", ylab="Standardized residuals",
+     main="Residuals vs index")
+abline(h=0, col="red", lwd=2)
+
+# 3) residuals vs predictors (one by one)
+
+train_full$city <- factor(train_full$city)
+Xcols <- c("city", "month", "temp","humidity","windspeed",
+           "co_mean","no2_mean","so2_mean","pm2_5_mean","o3_mean")
+
+for (x in Xcols) {
+  xx <- train_full[[x]]
+  ok <- is.finite(xx) & is.finite(rstd_gam_int3)
+
+  plot(xx[ok], rstd_gam_int3[ok], pch=16, cex=0.6,
+       xlab=x, ylab="Standardized residuals",
+       main=paste("Residuals vs", x))
+  abline(h=0, col="red", lwd=2)
+  lines(lowess(xx[ok], rstd_gam_int3[ok]), col="blue", lwd=2)
+}
+
+```
+
+
+```{r}
+qqPlot(residuals(fit_gam_int3))
+```
+
+
+```{r}
+plot(fit_gam_int3, shade = TRUE, shade.col = "lightblue")
+```
+```{r}
+pred_gam_int3 <- predict(fit_gam_int3, newdata = test_full)
+
+rmse_fit_gam_int3 <- rmse(test_full$max_aqi, pred_gam_int3)
+rmse_fit_gam_int3
+```
+
+
+```{r}
+resid_gam_init3 <- test_full$max_aqi - pred_gam_int3
+rse_fit_gam_init3 <- sqrt(sum(resid_gam_init3^2, na.rm = TRUE) / (sum(!is.na(resid_gam_init3)) - 1))
+rse_fit_gam_init3
+
+```
+
+# GAM interaction BOX_COX with pollutant and temp 
+
+**gam_int_bc** is a Box-Cox-transformed GAM for AQI (y_bc) that includes city fixed effects, nonlinear smooth main effects for PM2.5, O₃, SO₂, and temperature, linear effects for NO₂, CO, humidity, and wind speed, and two nonlinear interaction surfaces: O₃ × PM2.5 and month × temperature.
+
+```{r}
+
+gam_int_bc <- update(fit_gam_k_bc, .~.
+                + ti(o3_mean, pm2_5_mean, k=c(10,8)) 
+                + ti(month_num, temp, bs=c("cc", "tp"), k=c(12,5)))
+
+summary(gam_int_bc)
+```
+You fitted a Gaussian GAM (identity link) where the response is $ybc$  the Box–Cox–transformed version of max_aqi. So the model is explaining AQI on a transformed scale to make residuals closer to normal and variance more stable.
+
+
+**Parametric (linear) part**
+
+  - **Intercept = 9.933**: baseline transformed AQI for the reference city (Bronx) when numeric predictors are zero (mainly a baseline anchor).
+  - **City effects**: Erie (-0.365), Monroe (-0.226), and Queens (-0.160) are significantly lower than Bronx (extremely small p-values), indicating Bronx retains the highest baseline after correcting for pollutants and weather.
+  - **no2_mean**:NO₂ continues to provide a substantial positive contribution (+0.004, p=0.01).
+  - **CO_mean**: −0.185(p=0.143) doesnot show any significance.
+  - **Humidity and windspeed**: They are not substantial in this case, therefore they can add a very little independent signal once the smooths/interactions are taken into account.
+
+**Smooth terms (nonlinear effects)**
+
+  - **s(pm2_5_mean)** is the strongest main driver (edf ≈ 6.095, huge F, p<2e−16): PM2.5 affects AQI in a clearly nonlinear way.
+  - **s(o3_mean)** is also very strong (edf ≈ 7.148, p<2e−16): ozone has an important nonlinear relationship with AQI.
+  - **s(temp)** is significant but effectively linear (edf = 1, p=0.00305): temperature matters, but the shape doesn’t need much curvature.
+  - **s(so2_mean)** is not significant (p=0.42, edf=1): SO₂ provides little additional explanatory power in this model.
+  
+**interaction surfaces**
+
+  - **ti(o3_mean, pm2_5_mean)** is extremely significant (edf ≈ 38.98, p<2e−16): the impact of ozone depends strongly on PM2.5 levels (and vice versa), capturing “combined pollution” behavior.
+  - **ti(month, temp)** is significant (edf ≈ 17.46): the temperature–AQI relationship changes across months (seasonal modulation).
+  
+- **Adj. $R^2$** is 0.929 and Deviance explained = $93.2\%$: excellent fit—this model explains most of the variability in AQI (on the Box–Cox scale).
+
+- **Scale est.** is 0.1942, residual variance on the transformed scale (smaller is better here, and often improves with Box–Cox).
+
+AQI variability is primarily dominated by nonlinear PM2.5 and ozone effects, with a very strong O₃×PM2.5 relationship and a substantial seasonal temperature combination, while NO₂ contributes a small linear contribution and SO₂/humidity/wind have little independent influence.
+
+
+
+```{r}
+plot(gam_int_bc, shade = TRUE, shade.col = "lightblue")
+```
+The estimated influence on ybc is represented by the solid line/surface, the 95% CI is represented by dashed lines, and the data concentration is indicated by rug marks.
+
+**s(pm2_5_mean)** It exhibits a powerful growing effect. $ybc$ is dramatically increased by greater PM2.5, particularly at mid-high values. Because there are fewer data points at the extreme right, uncertainty increases there.
+High **s(o3_mean)** raises $ybc$ because o3_mean is mostly flat at low ozone and then rises sharply beyond ~0.05–0.08. At the greatest o3_mean levels, the CI expands.
+After other predictors, **s(so2_mean)** is almost flat around zero, suggesting that SO₂ adds minimal independent effect. This is consistent with the summary's lack of relevance.
+**s(temp)** The smooth is nearly linear and flat, suggesting that the model's primary temperature effect is weak. The primary indicator of seasonal temperature influence is ti (month, temp).
+The contours of **ti(o3_mean, pm2_5_mean)** clearly demonstrate the relationship between O₃ impact and PM2.5 level (and vice versa). When both pollutants are elevated, the highest contributions take place.
+**ti(month, temp)**, the contour pattern varies from month to month, indicating that the impact of temperature on AQI varies by season. This demonstrates the importance of the season-temperature relationship.
+```{r}
+qqPlot(residuals(gam_int_bc))
+```
+
+After the Box-Cox transform, residuals are roughly normal because this QQ-plot is around the straight line for the majority of the points. A few extreme AQI days are still more difficult to fit precisely because the remaining variations are mostly in the tails (e.g., points 1164/1232).
+
+
+```{r}
+rstd_gam_int_bc <- residuals(gam_int_bc, type = "pearson") 
+yhat_gam_int_bc <- fitted(gam_int_bc)
+n_gam_int_bc    <- length(rstd_gam)
+
+# 2) residuals vs fitted values
+ok <- is.finite(yhat_gam) & is.finite(rstd_gam_int_bc)
+plot(yhat_gam_int_bc[ok], rstd_gam_int_bc[ok], pch=16, cex=0.6,
+     xlab="Fitted values", ylab="Pearson residuals",
+     main="GAM: residuals vs fitted")
+abline(h=0, col="red", lwd=2)
+lines(lowess(yhat_gam_int_bc[ok], rstd_gam_int_bc[ok]), col="blue", lwd=2)
+
+# 1) residuals vs data index
+plot(1:n_gam_int_bc, rstd_gam_int_bc, pch=16, cex=0.6,
+     xlab="Data index", ylab="Standardized residuals",
+     main="Residuals vs index")
+abline(h=0, col="red", lwd=2)
+
+# 3) residuals vs predictors (one by one)
+
+train_full$city <- factor(train_full$city)
+Xcols <- c("city", "month", "temp","humidity","windspeed",
+           "co_mean","no2_mean","so2_mean","pm2_5_mean","o3_mean")
+
+for (x in Xcols) {
+  xx <- train_full[[x]]
+  ok <- is.finite(xx) & is.finite(rstd_gam_int_bc)
+
+  plot(xx[ok], rstd_gam_int_bc[ok], pch=16, cex=0.6,
+       xlab=x, ylab="Standardized residuals",
+       main=paste("Residuals vs", x))
+  abline(h=0, col="red", lwd=2)
+  lines(lowess(xx[ok], rstd_gam_int_bc[ok]), col="blue", lwd=2)
+}
+
+```
+```{r}
+
+```
+
+
+**Residuals vs fitted**: Residuals are mostly centered around 0 with no strong curve, so the mean structure is captured reasonably well. A bit more spread at mid–high fitted values suggests mild remaining heteroskedasticity/outliers.
+**Residuals vs index**: Residuals look roughly random around 0 across the data order, so there’s no clear drift/serial pattern. A few isolated large negatives/positives indicate occasional extreme misfits.
+**Residuals vs city**: Medians are near 0 for all cities, meaning no strong city-specific bias remains after modeling. Queens shows slightly wider tails (more extremes), suggesting harder-to-predict days there.
+**Residuals vs month**: Most months are centered near 0, but months around mid-year show more extreme negatives/positives, consistent with harder “episode” periods. Overall seasonality seems mostly handled, with a few month-specific outliers remaining.
+**Residuals vs temp**: Residuals stay near 0 across temperature, indicating the temperature effect is largely captured. Slightly larger spread at high temperatures suggests extreme hot days are still tougher.
+**Residuals vs humidity**: Residuals are centered near 0 with a nearly flat trend, so humidity adds little systematic structure. Some larger negative outliers at high humidity appear, but they are rare rather than a consistent pattern.
+**Residuals vs windspeed**: Residuals stay centered around 0 with no clear trend, so windspeed is not leaving systematic structure. Larger spread mainly occurs at common low–mid wind speeds, with few points at very high wind.
+**Residuals vs co_mean**: Mostly centered near 0 and fairly flat, suggesting CO adds limited independent structure after PM2.5/O₃ terms. The “striped” look comes from discrete/rounded CO values, with a few negative outliers at low CO.
+**Residuals vs no2_mean**: Residuals are roughly random around 0 across NO₂, indicating the NO₂ effect is adequately modeled. A few large negative outliers occur at mid NO₂ but there’s no strong pattern.
+**Residuals vs so2_mean**: Dense near low SO₂ with residuals centered at 0; no strong trend. Rare high-SO₂ points are sparse and noisier.
+**Residuals vs pm2_5_mean**: Generally centered at 0 across PM2.5; no major remaining pattern. Some outliers appear at low–mid PM2.5.
+**Residuals vs o3_mean**: Mostly flat around 0; ozone effect is largely captured. Larger spread at higher O₃ indicates extreme ozone days are harder.
+
+```{r}
+pred_gam_init_bc <- predict(gam_int_bc, newdata = test_full)
+
+
+# inverse Box-Cox (back to AQI)
+tmp <- lambda * pred_gam_init_bc + 1
+tmp[tmp < 0] <- NA                    # guard (should rarely happen)
+pred_aqi_init_bc <- tmp^(1/lambda)
+
+rmse_gam_int_bc <- rmse(test_full$max_aqi, pred_aqi_init_bc)
+rmse_gam_int_bc
+```
+The model's forecasts are usually 4.4 AQI points off on the 2024 test set. Therefore, a "typical" prediction for a genuine AQI of 60 might be between 55 and 65 (not always, but that's the broad scale of inaccuracy).
+
+```{r}
+resid_aqi_init_bc <- test_full$max_aqi - pred_aqi_init_bc
+rse_fit_gam_init_bc <- sqrt(sum(resid_aqi_init_bc^2, na.rm = TRUE) / (sum(!is.na(resid_aqi_init_bc)) - 1))
+rse_fit_gam_init_bc
+```
+
+# Conclusion
+
+```{r}
+c(rmse_fit_gam_k = rmse_fit_gam_k,
+  rmse_fit_gam_k_bc = rmse_fit_gam_k_bc,
+  rmse_fit_gam_bc_month  = rmse_fit_gam_bc_month,
+  rmse_fit_gam_pw = rmse_fit_gam_pw,
+  rmse_fit_gam_pw_o3_temp = rmse_fit_gam_pw_o3_temp,
+  rmse_fit_gam_int3 = rmse_fit_gam_int3,
+  rmse_gam_int_bc = rmse_gam_int_bc)
+
+```
+
+
+The four New York counties (Bronx, Erie, Monroe, and Queens) exhibit distinct seasonal behaviour and pollutant-driven variability in their air quality patterns between 2020 and 2024, with PM2.5 and O₃ continuously showing up as the main drivers of daily AQI. The comparison shows that extreme incidents still happen, but the frequency and distribution of harmful circumstances vary by location and year, even though average levels are still generally comparable. A Box-Cox transformed GAM with interaction terms was the best option to model these patterns because it maintains interpretability while improving residual behaviour: it achieves strong generalisation on 2024 (RMSE = $4.2776$ AQI units after back-transformation) and explains $93.2\%$ of deviance (adj. $R^2$ = $0.929$). Strong nonlinear effects of PM2.5 and O₃, a considerable O₃×PM2.5 interaction, and substantial seasonal temperature modulation (month×temp) are highlighted by the model, demonstrating that coupled pollution conditions and season-dependent meteorology play a key role in the degradation of air quality. Rare extreme AQI days are still the most difficult to predict, probably because of unobserved episodic events. Diagnostic plots indicate residuals that are mainly centred with better normality following transformation, with the remaining deviations concentrated in the tails. Overall, the research confirms that PM2.5 predominates on most days, ozone becomes more significant in warmer months, and the main variation between 2020 and 2024 is a change in the timing and frequency of unhealthy-day events among cities rather than a whole change in causes.
+
+# Thank you
+Thank you so much for studying the research.
+
